@@ -175,6 +175,114 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
   of the GitHub release.
 - [LICENSE](LICENSE): MIT.
 
+## Performance tips & best practices
+
+Rules grounded in the actual implementation — if you break them the
+benchmarks will catch you. The first group targets users of barflow,
+the second targets anyone touching the C core.
+
+### For users
+
+- **Prefer `track()` over a manual `Progress` context when you can.**
+  `track()` has a fast path (see `src/barflow/__init__.py:31`): if
+  you pass no `columns`, no `theme`, and `capture_output=False`, it
+  skips the Python `Progress` subclass entirely and instantiates
+  `_core.Progress` directly — one C construction, zero Python-side
+  column resolution. Adding a `theme=` or custom columns forces the
+  slow path through `_progress.Progress` which is still fast but
+  does extra Python work at setup time.
+- **Keep `min_interval` at the default (50 ms).** The render thread
+  sleeps on a condition variable with this timeout; at 20 fps you
+  get smooth motion without paying for renders the user can't see.
+  Lowering it below ~20 ms mostly burns CPU on re-renders that look
+  identical. Raising it above ~100 ms starts to feel laggy but
+  drops render-thread CPU toward zero — useful for long-running
+  background jobs where the bar is a liveness check, not a UX
+  element.
+- **Reuse one `Progress` across many tasks.** A single `Progress`
+  instance has one render thread, one render mutex, and one column
+  pipeline — add tasks to it with `add_task(total, desc)` instead
+  of spinning up a fresh `Progress` per task. The render thread
+  already walks every task on each tick.
+- **Don't pass `capture_output=True` unless you need it.** It wires
+  `hooks.StdoutCapture` in front of `sys.stdout` / `sys.stderr` so
+  any `print()` calls route through `Progress.write_above()`. That
+  adds a Python-level write interceptor on every user print — fine
+  for interactive scripts, unnecessary overhead for batch jobs
+  where you aren't printing from inside the loop.
+- **Short-circuit with `disable=True` in tests or non-TTY runs.**
+  The first thing the C core does on `tick`/`advance` is check
+  `st->disable` (see `_core.cpp:345`) and return immediately. Cost
+  drops to a single comparison — no atomic, no cv, no render
+  thread work.
+- **Avoid `CallbackColumn` in tight loops unless you need it.** It's
+  the only built-in column type that re-enters Python on the render
+  thread. The render thread acquires the GIL once per frame to run
+  callback columns (see `render_frame` around `_core.cpp:889`), but
+  if your callback is expensive or allocates heavily, it can
+  dominate render-thread cost and delay the next frame. Move the
+  computation out of the column if you can.
+- **For unknown totals (generators), theme accordingly.** Columns
+  that need a total (`PercentColumn`, `EtaColumn`) render empty when
+  `total=0`. Use a theme that only shows a spinner + rate +
+  elapsed, or build one manually with just `SpinnerColumn` +
+  `CountColumn` + `RateColumn`.
+- **Install a PGO wheel on Windows if you're squeezing every ns.**
+  `build_pgo.bat` produces a profile-guided optimized wheel that's
+  measurably faster on the peak it/s benchmark than the plain MSVC
+  build. Irrelevant for display-on workloads which are dominated
+  by the render thread, but visible on tight no-display loops.
+- **Free-threaded builds.** `cp313t` / `cp314t` wheels exist on
+  PyPI. On a no-GIL interpreter, `Tracker.tp_iternext` still does
+  the same atomic `fetch_add`, and producer threads scale almost
+  linearly across cores because the hot path never acquires a
+  lock. The render thread is still single-threaded.
+
+### For contributors touching `_core.cpp`
+
+- **The producer cacheline is sacred.** `Task.completed` is
+  `alignas(kCacheLine) std::atomic<uint64_t>` followed by an
+  explicit pad (`_core.cpp:212-218`). Cold fields (total, desc,
+  start time) live on a different line, so a `fetch_add` from the
+  producer core doesn't bounce the description string back and
+  forth. Don't add new hot fields to `Task` without putting them
+  next to `completed` and extending the pad.
+- **`fetch_add` uses `memory_order_relaxed`.** Never upgrade it
+  without a benchmark showing the old ordering was actually wrong.
+  The render thread reads `completed` with `memory_order_acquire`
+  (`_core.cpp:1037, 1322`) which is enough for our "the renderer
+  sees a monotonically non-decreasing count" guarantee. We don't
+  need release semantics on the producer side because we aren't
+  publishing any other state through the counter.
+- **Column formatting belongs on the render thread, not the
+  producer.** Every column type except `CALLBACK` is rendered from
+  pure C++ state; the producer loop has zero column-aware work.
+  If you find yourself threading column state through
+  `advance()`, stop — move it to `render_frame`.
+- **Gate `render_cv.notify_one()`.** Calling `notify_one` on every
+  `advance` is a perf trap: even when no waiter is parked, the cv
+  still acquires its internal mutex. The hot path should only
+  notify when it has crossed a render threshold. Watch the dirty
+  counter pattern in `render_frame` / `render_loop`
+  (`_core.cpp:1302-1328`) before adding notifications elsewhere.
+- **The render thread drops the GIL around `render_frame`.** See
+  the comment at `_core.cpp:1843-1844`: the render loop releases
+  GIL before painting so that `CallbackColumn` implementations
+  (and user code that acquires the GIL via `write_above()`) can
+  re-acquire it via `PyGILState_Ensure` without deadlocking. If
+  you add a new render-thread entry point, follow the same
+  convention.
+- **Benchmark before merging.** `python benchmarks/bench.py --n
+  5000000 --runs 3` is the quick check. If `track()` drops below
+  ~95 M it/s on Windows / Python 3.13, investigate before pushing
+  further changes. Full `--n 20000000 --runs 5` run is reserved
+  for the final pass of each iteration (see `ITERATIONS.md`).
+- **Don't change the column tuple shape without version-gating it.**
+  `parse_columns` currently accepts 5-tuple *or* 6-tuple rows so
+  that pre-glyph user code still works. Any further schema change
+  needs the same kind of tolerant parse, otherwise you break every
+  user who cached a theme dict.
+
 ## Optional
 
 - [ITERATIONS.md](ITERATIONS.md): Running log of design iterations and
