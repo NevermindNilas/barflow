@@ -1,0 +1,55 @@
+name: Build wheels (free-threaded)
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'src/barflow/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - '.github/workflows/wheels-freethreaded.yml'
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} / ${{ matrix.build }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        build:
+          - cp313-*
+          - cp313t-*
+          - cp314-*
+          - cp314t-*
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install cibuildwheel
+        run: python -m pip install --upgrade pip cibuildwheel==2.22.0
+
+      - name: Build wheels
+        env:
+          CIBW_BUILD: ${{ matrix.build }}
+          CIBW_ENABLE: cpython-freethreading cpython-prerelease
+          CIBW_TEST_COMMAND: >
+            python -c "import barflow; list(barflow.track(range(1000)))"
+        run: python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Sanitize artifact name
+        id: artifact
+        shell: bash
+        run: |
+          tag=$(echo "${{ matrix.build }}" | sed 's/-\*//; s/\*//g')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ steps.artifact.outputs.tag }}
+          path: ./wheelhouse/*.whl

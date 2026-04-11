@@ -1,0 +1,162 @@
+# BarFlow
+
+> Fast Python progress-bar library with a C++ core. Windows-first.
+> `barflow.track()` wraps an iterable in a live bar whose hot path is a
+> single atomic `fetch_add` in C++ plus the CPython call trampoline. A
+> background render thread owns all formatting and I/O, so the producer
+> loop never pays for rendering inline. Beats tqdm, rich.progress, and
+> alive-progress simultaneously on cold-import time, per-iter overhead,
+> peak it/s, and CPU cost (see benchmarks).
+
+This file follows the [llmstxt.org](https://llmstxt.org/) convention so
+AI assistants working inside this repo can orient themselves quickly.
+Links are repo-relative paths — every entry is a real file you can open
+with your file tool.
+
+## What BarFlow is
+
+BarFlow is a single PyPI distribution (`barflow`) that ships a compiled
+C-extension module (`barflow._core`, built from `src/barflow/_core.cpp`)
+plus a thin Python package that layers column factories, themes,
+spinners, hooks, and an asyncio wrapper on top. The top-level import is
+kept deliberately tiny (~2 ms) via `__getattr__` lazy-loading of every
+non-hot-path submodule.
+
+Key public API (see `src/barflow/__init__.py` for the full surface):
+
+- `barflow.track(iterable, total=None, desc=None, *, columns=None,
+  theme=None, disable=False, min_interval=0.05, capture_output=False)`
+  — the fast-path iterator wrapper. Returns a C-level `Tracker`.
+- `barflow.Progress(*columns, total=None, desc=None, theme=None,
+  disable=False, min_interval=0.05, capture_output=False)` — context
+  manager for manual `tick()` / `advance()` / `add_task()` / `update()`
+  / `write_above()` flows. Resolves columns + themes in Python, then
+  calls into `_core.Progress`.
+- `barflow.Tracker` — the C iterator type, re-exported for advanced use.
+- `barflow.aio.atrack(aiter, ...)` — async-iterable wrapper.
+
+## Python source (`src/barflow/`)
+
+- [src/barflow/\_\_init\_\_.py](src/barflow/__init__.py): Package entry
+  point. Defines `track()` and the `__getattr__` hook that lazy-loads
+  `Progress`, `columns`, `themes`, `spinners`, `aio`, and `hooks`.
+- [src/barflow/\_progress.py](src/barflow/_progress.py): Python
+  `Progress` subclass of `_core.Progress`. Resolves columns/themes and
+  wires up `capture_output=True` via `hooks.StdoutCapture`.
+- [src/barflow/columns.py](src/barflow/columns.py): Column factories
+  (`SpinnerColumn`, `DescriptionColumn`, `BarColumn`, `PercentColumn`,
+  `CountColumn`, `RateColumn`, `ElapsedColumn`, `EtaColumn`,
+  `TextColumn`) plus `resolve_columns()` which converts Python column
+  objects into the 5-tuple the C core expects.
+- [src/barflow/themes.py](src/barflow/themes.py): Named presets
+  (`classic`, `fire`, `neon`, `cyberpunk`, …) — each is a pre-built
+  list of columns you can pass via `theme="..."`.
+- [src/barflow/bar\_styles.py](src/barflow/bar_styles.py): Glyph sets
+  for `BarColumn(glyphs=...)` — blocks, ASCII, shades, pipes, etc.
+- [src/barflow/spinners.py](src/barflow/spinners.py): Spinner frame
+  library and the compositional DSL (`frame`, `scrolling`, `bouncing`,
+  `alongside`, `sequential`). Spinners are materialized into flat
+  string lists at build time so the render thread does `frames[tick %
+  len]` with no Python-side cost.
+- [src/barflow/style.py](src/barflow/style.py): ANSI color/style parser
+  used by every column that takes a `color=`/`style=` argument.
+- [src/barflow/hooks.py](src/barflow/hooks.py): `StdoutCapture` — the
+  `print()` interception that routes writes through
+  `Progress.write_above()` so user prints appear above live bars
+  without tearing.
+- [src/barflow/aio.py](src/barflow/aio.py): `atrack()` — asyncio
+  wrapper around an async iterable.
+
+## C++ core
+
+- [src/barflow/\_core.cpp](src/barflow/_core.cpp): The entire C
+  extension in one file (~1,550 lines). Contains:
+  - `Task` struct (atomic counter, total, desc, start time).
+  - `Progress` type (vector of tasks, render mutex + cv, column
+    pipeline, ANSI bar rendering with 1/8-block partial cells).
+  - `Tracker` type — a PyObject with a custom `tp_iternext` that does
+    `PyIter_Next(inner)` then `fetch_add(&task->count, 1,
+    memory_order_relaxed)`.
+  - Render thread: wakes on cv timeout (default 50 ms), snapshots all
+    task counts, runs the column pipeline, writes to stderr via
+    `WriteConsoleW` (Windows, UTF-16 transcoded, 32 KB chunks) or
+    `write(2)` (POSIX).
+  - `write_above()` primitive for interleaving user prints.
+  - Nine built-in column types decoded from Python 5-tuples (no column
+    logic lives in Python on the hot path).
+
+## Documentation
+
+- [docs/DESIGN.md](docs/DESIGN.md): Full architecture writeup — the
+  three-axis goal (startup, peak it/s, display-on throughput), hot-path
+  design, render thread, column pipeline, Windows console handling,
+  memory model, and the rationale behind each design choice. Start
+  here if you're changing the core.
+- [docs/FEATURE\_REQUESTS.md](docs/FEATURE_REQUESTS.md): Backlog sourced
+  from open issues across tqdm, rich, and alive-progress — features
+  users have asked for that BarFlow doesn't yet ship. Ordered by
+  rough priority.
+- [docs/PUBLISHING.md](docs/PUBLISHING.md): One-time PyPI setup and the
+  per-release checklist. Covers `build_dist.bat`, cibuildwheel wheel
+  matrix, and the `gh release` trigger.
+
+## Examples (`examples/`)
+
+- [examples/showcase.py](examples/showcase.py): Seven-scenario demo —
+  simple `track()`, custom columns, named themes, multi-task, captured
+  prints, etc. Works from any cwd. Good to run after a code change to
+  eyeball visual output.
+- [examples/themes\_showcase.py](examples/themes_showcase.py): Theme
+  gallery — runs every named theme in sequence. Supports
+  `--only <name>...` to filter.
+- [examples/parallel\_presets.py](examples/parallel_presets.py):
+  Multi-thread demo — one `Progress` instance per preset, one worker
+  thread per preset, shared cursor via ANSI cursor-up. Exercises the
+  render-mutex + `last_rendered_lines` accounting.
+- [examples/async\_stream.py](examples/async_stream.py): `barflow.aio`
+  demo — pulsing indeterminate bar over an async iterable with unknown
+  total.
+
+## Benchmarks
+
+- [benchmarks/bench.py](benchmarks/bench.py): Harness that measures
+  (1) cold import startup via subprocess with baseline subtraction,
+  (2) no-display hot path it/s, (3) display-on it/s against an
+  `io.StringIO` sink with `force_terminal=True`, and (4) CPU cost via
+  `time.process_time()` (which sums all threads — the background
+  render thread cannot hide). Run:
+  `python benchmarks/bench.py --n 20000000 --runs 5`.
+- [benchmarks/bench\_raw.md](benchmarks/bench_raw.md): Latest raw
+  output from the harness — regenerated every time `bench.py` runs.
+- [benchmarks/results.md](benchmarks/results.md): Methodology and
+  platform notes. Explains why tqdm is run with `mininterval=0.05`
+  (matching barflow's default) rather than the out-of-box 0.10.
+- [README.md](README.md#benchmarks): Headline table + per-axis
+  breakdown. At N = 20 M iters on Windows 11 / Python 3.13: barflow
+  wins cold import by 15–28×, per-iter overhead by 2.2×, display-on
+  throughput by 4.9× vs tqdm, and burns ~5× less CPU than tqdm /
+  ~50× less than rich and alive-progress.
+
+## Build & packaging
+
+- [pyproject.toml](pyproject.toml): `setuptools` build backend,
+  metadata, classifiers, keyword list, PEP 639 SPDX license field.
+  Build dependencies are just `setuptools>=77` + `wheel`.
+- [setup.py](setup.py): Declares the `barflow._core` extension with
+  the C++ source, language standard, and per-platform compile flags.
+- [MANIFEST.in](MANIFEST.in): Sdist inclusion rules.
+- [build.bat](build.bat): One-shot local build for dev work on
+  Windows (`python -m pip install -e .` with the MSVC toolchain).
+- [build\_dist.bat](build_dist.bat): Builds sdist + the local-platform
+  wheel into `dist/`. Full wheel matrix is produced by cibuildwheel in
+  CI, not by this script.
+- [LICENSE](LICENSE): MIT.
+
+## Optional
+
+- [ITERATIONS.md](ITERATIONS.md): Running log of design iterations and
+  micro-benchmarks collected while tuning the hot path. Historical —
+  not needed for day-to-day work, but useful if you want context on
+  why a particular optimization is shaped the way it is.
+- [.github/](.github/): GitHub Actions workflows (cibuildwheel matrix,
+  release-on-tag).

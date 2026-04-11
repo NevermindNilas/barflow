@@ -1,0 +1,87 @@
+name: Build wheels
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'src/barflow/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - '.github/workflows/wheels.yml'
+  workflow_dispatch:
+
+jobs:
+  build_wheels:
+    name: ${{ matrix.os }} / cp${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ['310', '311', '312', '313']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install cibuildwheel
+        run: python -m pip install --upgrade pip cibuildwheel==2.21.3
+
+      - name: Build wheels
+        env:
+          CIBW_BUILD: cp${{ matrix.python }}-*
+          CIBW_TEST_COMMAND: >
+            python -c "import barflow; list(barflow.track(range(1000)))"
+        run: python -m cibuildwheel --output-dir wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-cp${{ matrix.python }}
+          path: ./wheelhouse/*.whl
+
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Publish to PyPI only when a tag is pushed. Uses Trusted Publishers
+  # (OIDC) — no API token needed, but you must configure the publisher
+  # on PyPI once. See docs/PUBLISHING.md.
+  publish:
+    name: Publish to PyPI
+    needs: [build_wheels, build_sdist]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/barflow
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          verbose: true

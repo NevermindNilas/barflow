@@ -1,0 +1,21 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include setup.py
+include MANIFEST.in
+
+recursive-include src/barflow *.py *.cpp *.h
+recursive-include docs *.md
+recursive-include benchmarks *.py *.md
+recursive-include examples *.py
+
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.pyd
+global-exclude *.so
+global-exclude *.dll
+global-exclude .DS_Store
+prune build
+prune dist
+prune .github
+prune src/barflow/__pycache__

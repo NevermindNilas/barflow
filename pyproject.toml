@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "barflow"
+version = "0.2.0"
+description = "Fast Python progress bars with a C++ core. Windows-first."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "NevermindNilas" },
+]
+keywords = [
+    "progress", "progressbar", "progress-bar", "tqdm", "rich", "cli",
+    "terminal", "spinner", "cpp", "c-extension", "windows",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: C++",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Terminals",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage      = "https://github.com/NevermindNilas/barflow"
+Repository    = "https://github.com/NevermindNilas/barflow"
+Issues        = "https://github.com/NevermindNilas/barflow/issues"
+Changelog     = "https://github.com/NevermindNilas/barflow/releases"
+Documentation = "https://github.com/NevermindNilas/barflow/blob/main/docs/DESIGN.md"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.cibuildwheel]
+build-verbosity = 1
+test-command = 'python -c "import barflow; list(barflow.track(range(1000)))"'
+skip = ["pp*", "*-musllinux_i686", "*-win32"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
