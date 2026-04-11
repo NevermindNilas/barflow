@@ -13,13 +13,32 @@ on:
 
 jobs:
   build_wheels:
-    name: ${{ matrix.os }} / cp${{ matrix.python }}
+    name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        python: ['313', '314']
+        include:
+          # Windows (AMD64)
+          - { os: windows-latest,   python: '313',  archs: AMD64,        label: win-cp313 }
+          - { os: windows-latest,   python: '314',  archs: AMD64,        label: win-cp314 }
+          - { os: windows-latest,   python: '313t', archs: AMD64,        label: win-cp313t, free_threaded: true }
+          - { os: windows-latest,   python: '314t', archs: AMD64,        label: win-cp314t, free_threaded: true }
+          # macOS (universal: x86_64 + arm64)
+          - { os: macos-latest,     python: '313',  archs: 'x86_64 arm64', label: mac-cp313 }
+          - { os: macos-latest,     python: '314',  archs: 'x86_64 arm64', label: mac-cp314 }
+          - { os: macos-latest,     python: '313t', archs: 'x86_64 arm64', label: mac-cp313t, free_threaded: true }
+          - { os: macos-latest,     python: '314t', archs: 'x86_64 arm64', label: mac-cp314t, free_threaded: true }
+          # Linux x86_64 (native runner)
+          - { os: ubuntu-latest,    python: '313',  archs: x86_64,       label: linux-cp313-x86_64 }
+          - { os: ubuntu-latest,    python: '314',  archs: x86_64,       label: linux-cp314-x86_64 }
+          - { os: ubuntu-latest,    python: '313t', archs: x86_64,       label: linux-cp313t-x86_64, free_threaded: true }
+          - { os: ubuntu-latest,    python: '314t', archs: x86_64,       label: linux-cp314t-x86_64, free_threaded: true }
+          # Linux aarch64 (native arm runner — no QEMU)
+          - { os: ubuntu-24.04-arm, python: '313',  archs: aarch64,      label: linux-cp313-aarch64 }
+          - { os: ubuntu-24.04-arm, python: '314',  archs: aarch64,      label: linux-cp314-aarch64 }
+          - { os: ubuntu-24.04-arm, python: '313t', archs: aarch64,      label: linux-cp313t-aarch64, free_threaded: true }
+          - { os: ubuntu-24.04-arm, python: '314t', archs: aarch64,      label: linux-cp314t-aarch64, free_threaded: true }
     steps:
       - uses: actions/checkout@v4
 
@@ -27,25 +46,21 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Set up QEMU (aarch64 emulation on x86 runners)
-        if: runner.os == 'Linux'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Install cibuildwheel
         run: python -m pip install --upgrade pip cibuildwheel==3.4.1
 
       - name: Build wheels
         env:
           CIBW_BUILD: cp${{ matrix.python }}-*
+          CIBW_ARCHS: ${{ matrix.archs }}
+          CIBW_ENABLE: ${{ matrix.free_threaded && 'cpython-freethreading' || '' }}
           CIBW_TEST_COMMAND: >
             python -c "import barflow; list(barflow.track(range(1000)))"
         run: python -m cibuildwheel --output-dir wheelhouse
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-cp${{ matrix.python }}
+          name: wheels-${{ matrix.label }}
           path: ./wheelhouse/*.whl
 
   build_sdist:
@@ -91,3 +106,4 @@ jobs:
         with:
           packages-dir: dist
           verbose: true
+          skip-existing: true

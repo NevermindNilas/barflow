@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "barflow"
-version = "0.2.0"
+version = "0.2.1"
 description = "Fast Python progress bars with a C++ core. Windows-first."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -52,13 +52,4 @@ where = ["src"]
 [tool.cibuildwheel]
 build-verbosity = 1
 test-command = 'python -c "import barflow; list(barflow.track(range(1000)))"'
-skip = ["pp*", "*-musllinux_i686", "*-win32"]
-
-[tool.cibuildwheel.windows]
-archs = ["AMD64"]
-
-[tool.cibuildwheel.linux]
-archs = ["x86_64", "aarch64"]
-
-[tool.cibuildwheel.macos]
-archs = ["x86_64", "arm64"]
+skip = ["*-musllinux_i686", "*-win32"]
