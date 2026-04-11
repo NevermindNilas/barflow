@@ -25,10 +25,11 @@ respectively.
 - [ ] **Iter 2.** Gradient bars — `BarColumn(style_start=..., style_end=...)`
       that interpolates RGB along the bar length; per-glyph SGR on the
       render path.
-- [ ] **Iter 3.** Auto-width — `BarColumn(width="auto")` or `width=-1`
-      that fills remaining terminal width; query
-      `GetConsoleScreenBufferInfoEx` / `TIOCGWINSZ` cached in
-      `ProgressState`, re-query on window resize.
+- [x] **Iter 3.** Auto-width — `BarColumn(width=None)` flexes to fill
+      remaining terminal width. (The roadmap originally specified
+      `width="auto"` or `width=-1`; `None` was picked as the public
+      API and `-1` is the on-the-wire sentinel the Python layer sends
+      to the C core.)
 - [x] **Iter 4.** Custom bar glyphs — done out of order ahead of
       iters 2–3 in response to an explicit user request for
       "looks + presets". `BarColumn(glyphs=…)` accepts a name or dict
@@ -176,7 +177,33 @@ with barflow.Progress(
         p.tick()
 ```
 
-## Iter 4 — done (out of order, ahead of iters 2 and 3)
+## Iter 3 — done (retroactively checked off)
+
+The flex-width path was implemented alongside other column work and
+never got its checkbox flipped. Verified against the current tree:
+
+- **`src/barflow/columns.py`** — `BarColumn(width=None)` packs `-1`
+  into the column tuple as the "flex" sentinel (`columns.py:69`).
+- **`src/barflow/_core.cpp`** — `Column` gained a `flex` bool
+  (`_core.cpp:144`); `parse_columns` flips it on when a bar column
+  arrives with `width < 0`. `render_frame` detects the flex bar's
+  column index (`_core.cpp:879–886`), runs a two-stage measure +
+  emit pass, and sets `ctx.bar_width_override` to whatever cells
+  remain after the non-flex columns reserve their widths. The flex
+  bar's `render_column` case reads that override instead of the
+  literal width (`_core.cpp:605–606`).
+- **Terminal-width query** — `query_terminal_width()` at
+  `_core.cpp:560` uses `GetConsoleScreenBufferInfo` on Windows and
+  `ioctl(TIOCGWINSZ)` on POSIX. Queried per-frame, so window
+  resizes are picked up on the next render tick with no explicit
+  `SIGWINCH` handler.
+
+**Divergence from original spec**: the public API is `width=None`
+rather than `width="auto"`, and the terminal width is re-queried
+every frame rather than cached + invalidated on resize. Semantically
+identical — the bar resizes live as you drag the terminal edge.
+
+## Iter 4 — done (out of order, ahead of iter 2)
 
 **What changed**
 
