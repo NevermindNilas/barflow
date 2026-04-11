@@ -269,7 +269,8 @@ pip install barflow
 ```
 
 Wheels are published for Windows (AMD64), Linux (x86_64, aarch64), and
-macOS (x86_64, arm64) across Python 3.10–3.13.
+macOS (x86_64, arm64) for CPython 3.13 and 3.14, including the
+free-threaded `cp313t` / `cp314t` builds.
 
 ## Features
 
@@ -384,7 +385,7 @@ and the benchmarks methodology.
 ## Build from source
 
 Requires Visual Studio 2022+ (Windows) or GCC/Clang + Python headers
-(POSIX) and Python ≥ 3.10.
+(POSIX) and Python ≥ 3.13.
 
 ```
 # Windows
