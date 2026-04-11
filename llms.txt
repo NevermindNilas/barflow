@@ -25,8 +25,11 @@ non-hot-path submodule.
 Key public API (see `src/barflow/__init__.py` for the full surface):
 
 - `barflow.track(iterable, total=None, desc=None, *, columns=None,
-  theme=None, disable=False, min_interval=0.05, capture_output=False)`
-  — the fast-path iterator wrapper. Returns a C-level `Tracker`.
+  theme=None, task_id=0, disable=False, min_interval=0.05,
+  capture_output=False)` — the fast-path iterator wrapper. Returns a
+  C-level `Tracker`. Fast path (no columns/theme/capture) goes
+  straight to `_core.Progress`; decorated calls route through the
+  Python `Progress` subclass in `_progress.py`.
 - `barflow.Progress(*columns, total=None, desc=None, theme=None,
   disable=False, min_interval=0.05, capture_output=False)` — context
   manager for manual `tick()` / `advance()` / `add_task()` / `update()`
@@ -43,11 +46,13 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 - [src/barflow/\_progress.py](src/barflow/_progress.py): Python
   `Progress` subclass of `_core.Progress`. Resolves columns/themes and
   wires up `capture_output=True` via `hooks.StdoutCapture`.
-- [src/barflow/columns.py](src/barflow/columns.py): Column factories
-  (`SpinnerColumn`, `DescriptionColumn`, `BarColumn`, `PercentColumn`,
+- [src/barflow/columns.py](src/barflow/columns.py): Column factories —
+  `TextColumn`, `DescriptionColumn`, `BarColumn`, `PercentColumn`,
   `CountColumn`, `RateColumn`, `ElapsedColumn`, `EtaColumn`,
-  `TextColumn`) plus `resolve_columns()` which converts Python column
-  objects into the 5-tuple the C core expects.
+  `SpinnerColumn`, and `CallbackColumn` (the last accepts a Python
+  callable rendered on the column pipeline) — plus `resolve_columns()`
+  which converts Python column objects into the 5-tuple the C core
+  expects.
 - [src/barflow/themes.py](src/barflow/themes.py): Named presets
   (`classic`, `fire`, `neon`, `cyberpunk`, …) — each is a pre-built
   list of columns you can pass via `theme="..."`.
@@ -70,7 +75,7 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 ## C++ core
 
 - [src/barflow/\_core.cpp](src/barflow/_core.cpp): The entire C
-  extension in one file (~1,550 lines). Contains:
+  extension in one file (~2,170 lines). Contains:
   - `Task` struct (atomic counter, total, desc, start time).
   - `Progress` type (vector of tasks, render mutex + cv, column
     pipeline, ANSI bar rendering with 1/8-block partial cells).
@@ -82,8 +87,10 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
     `WriteConsoleW` (Windows, UTF-16 transcoded, 32 KB chunks) or
     `write(2)` (POSIX).
   - `write_above()` primitive for interleaving user prints.
-  - Nine built-in column types decoded from Python 5-tuples (no column
-    logic lives in Python on the hot path).
+  - Ten built-in column types decoded from Python 5-tuples: `TEXT`,
+    `DESCRIPTION`, `BAR`, `PERCENT`, `COUNT`, `RATE`, `ELAPSED`, `ETA`,
+    `SPINNER`, `CALLBACK`. Only `CALLBACK` re-enters Python on the
+    render thread; the other nine are pure C++.
 
 ## Documentation
 
@@ -119,7 +126,7 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 
 ## Benchmarks
 
-- [benchmarks/bench.py](benchmarks/bench.py): Harness that measures
+- [benchmarks/bench.py](benchmarks/bench.py): Main harness that measures
   (1) cold import startup via subprocess with baseline subtraction,
   (2) no-display hot path it/s, (3) display-on it/s against an
   `io.StringIO` sink with `force_terminal=True`, and (4) CPU cost via
@@ -131,6 +138,14 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 - [benchmarks/results.md](benchmarks/results.md): Methodology and
   platform notes. Explains why tqdm is run with `mininterval=0.05`
   (matching barflow's default) rather than the out-of-box 0.10.
+- Specialized microbench scripts — `bench_first_frame.py`,
+  `bench_memory.py`, `bench_metadata_churn.py`, `bench_multibar.py`,
+  `bench_tail_latency.py` — each isolates one axis (first-frame
+  latency, RSS, metadata update cost, multi-task fan-out, tail
+  latency). Useful for regression-hunting a specific code path.
+- [benchmarks/pgo\_train.py](benchmarks/pgo_train.py): Workload driver
+  used by `build_pgo.bat` to collect profile data for PGO-optimized
+  Windows builds.
 - [README.md](README.md#benchmarks): Headline table + per-axis
   breakdown. At N = 20 M iters on Windows 11 / Python 3.13: barflow
   wins cold import by 15–28×, per-iter overhead by 2.2×, display-on
@@ -150,6 +165,14 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 - [build\_dist.bat](build_dist.bat): Builds sdist + the local-platform
   wheel into `dist/`. Full wheel matrix is produced by cibuildwheel in
   CI, not by this script.
+- [build\_pgo.bat](build_pgo.bat): Two-stage profile-guided optimization
+  build on Windows — first compiles an instrumented build, runs
+  `benchmarks/pgo_train.py` to collect a profile, then rebuilds with
+  the profile applied for the final wheel.
+- [CHANGELOG.md](CHANGELOG.md): Keep-a-Changelog-style release notes.
+  The `Build wheels` workflow extracts the section for the pushed tag
+  via `.github/scripts/extract_changelog.py` and uses it as the body
+  of the GitHub release.
 - [LICENSE](LICENSE): MIT.
 
 ## Optional
@@ -159,4 +182,7 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
   not needed for day-to-day work, but useful if you want context on
   why a particular optimization is shaped the way it is.
 - [.github/](.github/): GitHub Actions workflows (cibuildwheel matrix,
-  release-on-tag).
+  PyPI publish via Trusted Publisher, automatic GitHub release on tag
+  with wheels attached) plus `scripts/extract_changelog.py` which
+  pulls the per-tag section out of `CHANGELOG.md` for the release
+  body.
