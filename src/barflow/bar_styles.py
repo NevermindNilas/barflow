@@ -167,6 +167,253 @@ BAR_STYLES: dict[str, dict] = {
         "left":     "",
         "right":    "",
     },
+
+    # ---- Neon / unique glyph sets ---------------------------------------
+
+    # Lightning bolts marching: `⚡⚡⚡⚡····`.
+    "lightning": {
+        "fill":     "⚡",  # ⚡
+        "empty":    "·",  # ·
+        "partials": [],
+        "left":     " ",
+        "right":    " ",
+    },
+
+    # Diamonds: `◆◆◆◆◇◇◇◇`.
+    "diamond": {
+        "fill":     "◆",  # ◆
+        "empty":    "◇",  # ◇
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Pixel cells: `▮▮▮▮▯▯▯▯`.
+    "pixel": {
+        "fill":     "▮",  # ▮
+        "empty":    "▯",  # ▯
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Triangle wedges (synthwave): `◤◤◤◤◢◢◢◢`.
+    "synthwave": {
+        "fill":     "◤",  # ◤
+        "empty":    "◢",  # ◢
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Bricks: `▰▰▰▰▱▱▱▱`.
+    "bricks": {
+        "fill":     "▰",  # ▰
+        "empty":    "▱",  # ▱
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Sparkles: `✦✦✦✦✧✧✧✧`.
+    "sparkle": {
+        "fill":     "✦",  # ✦
+        "empty":    "✧",  # ✧
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Bubbles: `◉◉◉◉◌◌◌◌`.
+    "bubble": {
+        "fill":     "◉",  # ◉
+        "empty":    "◌",  # ◌
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Gems: `❖❖❖❖◇◇◇◇`.
+    "gem": {
+        "fill":     "❖",  # ❖
+        "empty":    "◇",  # ◇
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Chevrons in cyan-bracket frame: `❯❯❯❯❮❮❮❮`.
+    "chevron": {
+        "fill":     "❯",  # ❯
+        "empty":    "❮",  # ❮
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Rail: `▰▰▰▰┄┄┄┄`.
+    "rail": {
+        "fill":     "▰",  # ▰
+        "empty":    "┄",  # ┄
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Slashes: `////····`.
+    "slash": {
+        "fill":     "╱",  # ╱
+        "empty":    "·",  # ·
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Glow: `◎◎◎◎○○○○`.
+    "glow": {
+        "fill":     "◎",  # ◎
+        "empty":    "○",  # ○
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Plasma squares: `▣▣▣▣▢▢▢▢`.
+    "plasma": {
+        "fill":     "▣",  # ▣
+        "empty":    "▢",  # ▢
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # ASCII terminal-prompt feel: `[>>>>....]`.
+    "terminal": {
+        "fill":     ">",
+        "empty":    ".",
+        "partials": [],
+        "left":     "[",
+        "right":    "]",
+    },
+
+    # ASCII tilde wave: `~~~~....`.
+    "wave_ascii": {
+        "fill":     "~",
+        "empty":    ".",
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # ASCII binary: `1111110000`.
+    "binary": {
+        "fill":     "1",
+        "empty":    "0",
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # ASCII hash with curly braces: `{####....}`.
+    "curly": {
+        "fill":     "#",
+        "empty":    ".",
+        "partials": [],
+        "left":     "{",
+        "right":    "}",
+    },
+
+    # ASCII chevron march: `>>>>>....`.
+    "march": {
+        "fill":     ">",
+        "empty":    "-",
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # ASCII railroad: `=+=+=+----`.
+    "rail_ascii": {
+        "fill":     "+",
+        "empty":    "-",
+        "partials": ["="],
+        "left":     "|",
+        "right":    "|",
+    },
+
+    # 8-shade vapor gradient (denser than `shade`): `█▓▒░·`.
+    "vapor": {
+        "fill":     "█",  # █
+        "empty":    "·",  # ·
+        "partials": ["░", "▒", "▓"],  # ░ ▒ ▓
+        "left":     "",
+        "right":    "",
+    },
+
+    # ---- Emoji glyph sets (2-cell wide; pair only with 2-cell partners) -
+
+    # Fire emoji: `🔥🔥🔥🔥⬛⬛⬛⬛`.
+    "emoji_fire": {
+        "fill":     "\U0001f525",  # 🔥
+        "empty":    "⬛",      # ⬛
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Rocket trail: `🚀🚀🚀🚀🌑🌑🌑🌑`.
+    "emoji_rocket": {
+        "fill":     "\U0001f680",  # 🚀
+        "empty":    "\U0001f311",  # 🌑
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Sakura petals: `🌸🌸🌸🌸⬜⬜⬜⬜`.
+    "emoji_sakura": {
+        "fill":     "\U0001f338",  # 🌸
+        "empty":    "⬜",      # ⬜
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Lightning storm: `⚡⚡⚡⚡☁️ ...` simplified to ⚡/cloud-cell.
+    "emoji_storm": {
+        "fill":     "⚡️",  # ⚡️
+        "empty":    "☁️",  # ☁️
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Sparkles emoji: `✨✨✨✨▫️▫️▫️▫️`.
+    "emoji_sparkle": {
+        "fill":     "✨",        # ✨
+        "empty":    "▫️",  # ▫️
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Pacman vibe (ASCII safe-ish): `🟡🟡🟡🟡⚫⚫⚫⚫`.
+    "emoji_pacman": {
+        "fill":     "\U0001f7e1",  # 🟡
+        "empty":    "⚫",      # ⚫
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
+    # Heartbeat: `❤️❤️❤️❤️🖤🖤🖤🖤`.
+    "emoji_heart": {
+        "fill":     "❤️",  # ❤️
+        "empty":    "\U0001f5a4",    # 🖤
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
 }
 
 

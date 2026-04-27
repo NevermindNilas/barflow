@@ -33,6 +33,59 @@ SPINNERS: dict[str, list[str]] = {
     "hamburger": ["☱","☲","☴"],
     "grow_vertical": ["▁","▃","▄","▅","▆","▇","▆","▅","▄","▃"],
     "grow_horizontal": ["▏","▎","▍","▌","▋","▊","▉","▊","▋","▌","▍","▎"],
+
+    # ---- Neon / unique spinner sets -------------------------------------
+
+    # Neon pulse — bubble swelling and shrinking.
+    "pulse":      ["·","∘","○","◯","○","∘","·"," "],
+
+    # Spark / flicker.
+    "spark":      ["·","✦","★","✦","·"," "],
+
+    # Thunder strike.
+    "thunder":    ["⚡"," ","⚡","⚡⚡"," ","⚡"],
+
+    # Diamond rotate.
+    "diamond":    ["◇","◈","◆","◈"],
+
+    # Sharp arrowhead spin (synthwave triangles).
+    "wedges":     ["◢","◣","◤","◥"],
+
+    # Hexagon roll.
+    "hex":        ["⬡","⬢","⬡","⬢"],
+
+    # Half-circle moon (text-only, 1-wide compatible).
+    "moon_text":  ["◐","◓","◑","◒"],
+
+    # Emoji moon phases (2-wide).
+    "moon":       ["\U0001f311","\U0001f312","\U0001f313","\U0001f314","\U0001f315","\U0001f316","\U0001f317","\U0001f318"],
+
+    # Weather rotation.
+    "weather":    ["☀️","\U0001f324","⛅","\U0001f325","☁️","\U0001f326","\U0001f327","⛈️","\U0001f329"],
+
+    # Rocket countdown.
+    "rocket":     ["3","2","1","\U0001f680","✨","✨"],
+
+    # Heartbeat.
+    "heartbeat":  ["♡","♥","\U0001f497","♥","♡"],
+
+    # Glitch noise.
+    "glitch":     ["▓","▒","░","▒","▓","█","▓","▒"],
+
+    # Loading dots growing.
+    "loading":    [".  ", ".. ", "...", " ..", "  .", "   "],
+
+    # ASCII spinner using slashes.
+    "slash":      ["╱","─","╲","│"],
+
+    # Caret march.
+    "caret":      [">  ", " > ", "  >", "   ", "  <", " < ", "<  "],
+
+    # Squares cycling fill.
+    "square":     ["◰","◳","◲","◱"],
+
+    # Pong ball bouncing inside brackets.
+    "pong":       ["[●    ]","[ ●   ]","[  ●  ]","[   ● ]","[    ●]","[   ● ]","[  ●  ]","[ ●   ]"],
 }
 
 

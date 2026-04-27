@@ -66,19 +66,6 @@
 
 namespace {
 
-// 1/8 partial-block glyphs for smooth bar rendering.
-constexpr const char* kBlockChars[9] = {
-    " ",
-    "\xe2\x96\x8f",  // U+258F  1/8
-    "\xe2\x96\x8e",  // U+258E  2/8
-    "\xe2\x96\x8d",  // U+258D  3/8
-    "\xe2\x96\x8c",  // U+258C  4/8
-    "\xe2\x96\x8b",  // U+258B  5/8
-    "\xe2\x96\x8a",  // U+258A  6/8
-    "\xe2\x96\x89",  // U+2589  7/8
-    "\xe2\x96\x88",  // U+2588  8/8
-};
-
 enum ColumnType : int {
     COL_TEXT        = 0,
     COL_DESCRIPTION = 1,
@@ -236,6 +223,15 @@ struct ProgressState {
     // so it remains lock-free under the free-threaded build.
     std::vector<std::unique_ptr<Task>> tasks;
     std::vector<Column>                 columns;
+
+    // Cached column-pipeline flags. Filled once after parse_columns /
+    // install_default_columns (single-threaded init); read by the render
+    // thread on every wakeup to avoid re-scanning `columns` on each tick.
+    // `flex_bar_idx` is the column index of the first flex bar (-1 if
+    // none) — render_frame uses it directly instead of re-scanning.
+    bool has_spinner_col{false};
+    bool has_callback_col{false};
+    int  flex_bar_idx{-1};
 
     // Stable pointer to task[0] for the lock-free hot path. Set on first
     // task creation, never reassigned. Task lives in unique_ptr on the
@@ -456,11 +452,27 @@ void format_seconds(std::string& out, double s) {
 
 // -------- Column rendering --------
 
-// Cached `types.SimpleNamespace` constructor. Populated once at module
-// init so the render thread can build task snapshots without repeatedly
-// importing the `types` module. nullptr until PyInit__core() runs.
-static PyObject* g_simple_namespace = nullptr;
+// Cached `types.SimpleNamespace` constructor. Populated lazily on first
+// CallbackColumn render so cold-import of `barflow` does not pay the
+// `import types` cost (~0.3 ms on Linux) for users who never construct
+// a CallbackColumn. `g_empty_tuple` stays eager — PyTuple_New(0) is free.
+static PyObject* g_simple_namespace = nullptr;  // lazy; see ensure_simple_namespace
 static PyObject* g_empty_tuple      = nullptr;
+
+// Resolve `types.SimpleNamespace` on first use. Caller MUST hold the GIL.
+// Returns true on success and leaves `g_simple_namespace` populated; on
+// failure returns false with the Python exception cleared (callers fall
+// back to nullptr snapshots, same as the GIL-acquire-failure path).
+static bool ensure_simple_namespace() {
+    if (g_simple_namespace) return true;
+    PyObject* types_mod = PyImport_ImportModule("types");
+    if (!types_mod) { PyErr_Clear(); return false; }
+    PyObject* sn = PyObject_GetAttrString(types_mod, "SimpleNamespace");
+    Py_DECREF(types_mod);
+    if (!sn) { PyErr_Clear(); return false; }
+    g_simple_namespace = sn;  // strong ref held for module lifetime
+    return true;
+}
 
 struct RenderCtx {
     bool      vt_enabled;
@@ -775,7 +787,7 @@ void render_column(const Column& col, const Task& t,
 // (exception is cleared — we don't want to surface it from the render
 // thread).
 static PyObject* build_task_snapshot(const Task& t, const RenderCtx& ctx) {
-    if (!g_simple_namespace || !g_empty_tuple) return nullptr;
+    if (!ensure_simple_namespace() || !g_empty_tuple) return nullptr;
 
     PyObject* kw = PyDict_New();
     if (!kw) { PyErr_Clear(); return nullptr; }
@@ -812,6 +824,25 @@ static PyObject* build_task_snapshot(const Task& t, const RenderCtx& ctx) {
 }
 
 // Fallback column set when user passes no columns.
+// Compute cached column-pipeline flags from `st->columns`. Call once
+// after column setup (single-threaded init) so the render thread can
+// read them on every wakeup without re-scanning the column list.
+static void refresh_column_flags(ProgressState* st) {
+    bool spinner = false, callback = false;
+    int  flex_idx = -1;
+    for (size_t ci = 0; ci < st->columns.size(); ++ci) {
+        const auto& c = st->columns[ci];
+        if (c.type == COL_SPINNER)  spinner = true;
+        if (c.type == COL_CALLBACK) callback = true;
+        if (c.type == COL_BAR && c.flex && flex_idx < 0) {
+            flex_idx = static_cast<int>(ci);
+        }
+    }
+    st->has_spinner_col  = spinner;
+    st->has_callback_col = callback;
+    st->flex_bar_idx     = flex_idx;
+}
+
 void install_default_columns(ProgressState* st) {
     st->columns.clear();
     auto mk = [&](int type, std::string text = "", int width = 0,
@@ -872,20 +903,12 @@ void render_frame(ProgressState* st) {
     std::string& buf = st->scratch;
     buf.clear();
 
-    // Scan columns once to drive the rest of the frame. Detect callback
-    // columns (needs GIL), detect a flex bar (needs two-stage render),
-    // and record the flex bar's column index for the split.
-    bool has_callback = false;
-    int  flex_bar_idx = -1;
-    bool has_spinner_col = false;
-    for (size_t ci = 0; ci < st->columns.size(); ++ci) {
-        const auto& c = st->columns[ci];
-        if (c.type == COL_CALLBACK) has_callback = true;
-        if (c.type == COL_SPINNER)  has_spinner_col = true;
-        if (c.type == COL_BAR && c.flex && flex_bar_idx < 0) {
-            flex_bar_idx = static_cast<int>(ci);
-        }
-    }
+    // Pull cached column-pipeline flags (computed once at column setup).
+    // `has_callback` controls GIL acquisition; `flex_bar_idx` selects the
+    // two-stage flex render path; `has_spinner_col` is reserved for the
+    // dirty-skip heuristic that lives in render_loop.
+    const bool has_callback = st->has_callback_col;
+    const int  flex_bar_idx = st->flex_bar_idx;
     PyGILState_STATE gil_state{};
     if (has_callback) {
         gil_state = PyGILState_Ensure();
@@ -1055,16 +1078,25 @@ void render_frame(ProgressState* st) {
         // for the affected line.
         std::vector<char> visible_cols(ncols, 1);
 
+        // Per-column display-cell counts for THIS frame, populated inline
+        // as each column is rendered. The flex path measures non-bar
+        // columns up front (it needs the widths to plan the collapse),
+        // then patches in the flex bar's width post-render. The non-flex
+        // path measures lazily after each render_column. Either way the
+        // delta-emit path downstream reads `this_cells` directly without
+        // re-walking col_out.
+        std::vector<int> this_cells(ncols, 0);
+
         if (flex_bar_idx < 0) {
-            // Non-flex: render every column into its col_out[] slot.
-            // Unlike before we go through col_out (not buf) so the
-            // delta path has something to diff against. On frames where
+            // Non-flex: render every column into its col_out[] slot and
+            // measure its cell width in the same pass. On frames where
             // everything changed, the downstream emit-loop just appends
             // col_out[ci] straight into buf — net cost is one extra
             // string copy which is cheap compared to WriteConsoleW.
             for (size_t ci = 0; ci < ncols; ++ci) {
                 col_out[ci].clear();
                 render_column(st->columns[ci], *task, col_out[ci], ctx);
+                this_cells[ci] = count_display_cells(col_out[ci]);
             }
         } else {
             // Flex path — progressive collapse so that a resize into a
@@ -1077,18 +1109,16 @@ void render_frame(ProgressState* st) {
             //      wider than the terminal, hard-truncate it.
             const int N = static_cast<int>(st->columns.size());
 
-            // Measure every non-bar column. cells_per_col + visible_cols
-            // are sized off N (typically <20), so short-lived heap is
-            // fine; col_out persists across frames so the rendered
-            // strings retain their allocator size-class.
-            std::vector<int> cells_per_col(static_cast<size_t>(N), 0);
+            // Measure every non-bar column. The flex bar is rendered
+            // later once body_w is known; its cell width is patched into
+            // `this_cells` post-render below.
             int sum_non_bar = 0;
             for (int ci = 0; ci < N; ++ci) {
                 col_out[ci].clear();
                 if (ci == flex_bar_idx) continue;
                 render_column(st->columns[ci], *task, col_out[ci], ctx);
-                cells_per_col[ci] = count_display_cells(col_out[ci]);
-                sum_non_bar += cells_per_col[ci];
+                this_cells[ci] = count_display_cells(col_out[ci]);
+                sum_non_bar += this_cells[ci];
             }
 
             // Plan: decide body_w and which columns stay visible.
@@ -1115,7 +1145,7 @@ void render_frame(ProgressState* st) {
                     // terminal width, we truncate it instead.
                     int anchor = -1;
                     for (int ci = 0; ci < N; ++ci) {
-                        if (ci != flex_bar_idx && cells_per_col[ci] > 0) {
+                        if (ci != flex_bar_idx && this_cells[ci] > 0) {
                             anchor = ci;
                             break;
                         }
@@ -1129,8 +1159,8 @@ void render_frame(ProgressState* st) {
                     int cum = sum_non_bar;
                     for (int ci = N - 1; ci > anchor && cum > available; --ci) {
                         if (ci == flex_bar_idx) continue;
-                        if (cells_per_col[ci] == 0) { visible_cols[ci] = 0; continue; }
-                        cum -= cells_per_col[ci];
+                        if (this_cells[ci] == 0) { visible_cols[ci] = 0; continue; }
+                        cum -= this_cells[ci];
                         visible_cols[ci] = 0;
                     }
 
@@ -1142,21 +1172,27 @@ void render_frame(ProgressState* st) {
                         int others = 0;
                         for (int ci = 0; ci < N; ++ci) {
                             if (!visible_cols[ci] || ci == anchor) continue;
-                            others += cells_per_col[ci];
+                            others += this_cells[ci];
                         }
                         int budget = available - others;
                         if (budget < 0) budget = 0;
                         truncate_to_cells(col_out[anchor], budget);
+                        // truncate_to_cells mutated col_out[anchor]; refresh
+                        // its cell count so downstream delta-diff reads the
+                        // post-clip width.
+                        this_cells[anchor] = count_display_cells(col_out[anchor]);
                     }
                 }
             }
 
-            // Render the flex bar if it survived the collapse.
+            // Render the flex bar if it survived the collapse, then
+            // patch its cell width into the per-column table.
             if (!hide_bar) {
                 ctx.bar_width_override = body_w;
                 render_column(st->columns[flex_bar_idx], *task,
                               col_out[flex_bar_idx], ctx);
                 ctx.bar_width_override = -1;
+                this_cells[flex_bar_idx] = count_display_cells(col_out[flex_bar_idx]);
             }
         }
 
@@ -1187,14 +1223,9 @@ void render_frame(ProgressState* st) {
         auto&  prev_cells  = st->prev_col_cells[ti];
         auto&  prev_vis    = st->prev_visible_mask[ti];
 
-        // Precompute this frame's per-column cell widths + per-column
-        // "is always dirty" (spinner => never try to skip).
-        std::vector<int> this_cells(ncols, 0);
-        for (size_t ci = 0; ci < ncols; ++ci) {
-            if (visible_cols[ci]) {
-                this_cells[ci] = count_display_cells(col_out[ci]);
-            }
-        }
+        // `this_cells[]` was filled inline as each column was rendered
+        // above (non-flex path) or measured against the flex collapse
+        // plan + flex bar (flex path) — no need to re-walk col_out here.
 
         // Check if the visibility mask changed for this task.
         bool task_delta_ok = use_delta;
@@ -1294,7 +1325,6 @@ void render_frame(ProgressState* st) {
     // between now and the next render invalidates the cache.
     st->delta_valid = true;
     st->prev_term_w = term_w;
-    (void)has_spinner_col;  // currently reserved for future dirty-skip heuristics
     write_bytes(st, buf.data(), buf.size());
 }
 
@@ -1312,11 +1342,9 @@ void render_loop(ProgressState* st) {
 
         // Render unconditionally if there is a spinner (it animates even
         // with no producer progress); otherwise only if counters moved.
-        bool has_spinner = false;
-        for (const auto& c : st->columns) {
-            if (c.type == COL_SPINNER) { has_spinner = true; break; }
-        }
-        bool any_dirty = has_spinner;
+        // The spinner flag is cached at column setup so we don't re-scan
+        // the column vector on every wakeup (every `min_interval`).
+        bool any_dirty = st->has_spinner_col;
         if (!any_dirty) {
             for (auto& t : st->tasks) {
                 if (t->completed.load(std::memory_order_acquire) != t->last_snapshot) {
@@ -1519,6 +1547,7 @@ int Progress_init(PyProgress* self, PyObject* args, PyObject* kwds) {
 
     if (parse_columns(columns_obj, self->state->columns) < 0) return -1;
     if (self->state->columns.empty()) install_default_columns(self->state);
+    refresh_column_flags(self->state);
 
     if (total_obj != Py_None) {
         uint64_t total = PyLong_AsUnsignedLongLong(total_obj);
@@ -2150,17 +2179,10 @@ extern "C" PyMODINIT_FUNC PyInit__core(void) {
     PyModule_AddIntConstant(m, "COL_SPINNER",     COL_SPINNER);
     PyModule_AddIntConstant(m, "COL_CALLBACK",    COL_CALLBACK);
 
-    // Cache types.SimpleNamespace for task snapshot construction. Held
-    // as a module-level singleton so the render thread doesn't pay
-    // import cost on every frame. The empty args tuple is likewise
-    // cached and reused across every PyObject_Call.
-    {
-        PyObject* types_mod = PyImport_ImportModule("types");
-        if (!types_mod) { Py_DECREF(m); return nullptr; }
-        g_simple_namespace = PyObject_GetAttrString(types_mod, "SimpleNamespace");
-        Py_DECREF(types_mod);
-        if (!g_simple_namespace) { Py_DECREF(m); return nullptr; }
-    }
+    // `g_simple_namespace` is loaded lazily on first CallbackColumn render
+    // (see ensure_simple_namespace) so cold import doesn't pay for
+    // `import types`. The empty args tuple stays eager — free to allocate
+    // and reused across every PyObject_Call.
     g_empty_tuple = PyTuple_New(0);
     if (!g_empty_tuple) { Py_DECREF(m); return nullptr; }
 

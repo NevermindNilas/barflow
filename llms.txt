@@ -143,9 +143,6 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
   `bench_tail_latency.py` — each isolates one axis (first-frame
   latency, RSS, metadata update cost, multi-task fan-out, tail
   latency). Useful for regression-hunting a specific code path.
-- [benchmarks/pgo\_train.py](benchmarks/pgo_train.py): Workload driver
-  used by `build_pgo.bat` to collect profile data for PGO-optimized
-  Windows builds.
 - [README.md](README.md#benchmarks): Headline table + per-axis
   breakdown. At N = 20 M iters on Windows 11 / Python 3.13: barflow
   wins cold import by 15–28×, per-iter overhead by 2.2×, display-on
@@ -165,10 +162,6 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 - [build\_dist.bat](build_dist.bat): Builds sdist + the local-platform
   wheel into `dist/`. Full wheel matrix is produced by cibuildwheel in
   CI, not by this script.
-- [build\_pgo.bat](build_pgo.bat): Two-stage profile-guided optimization
-  build on Windows — first compiles an instrumented build, runs
-  `benchmarks/pgo_train.py` to collect a profile, then rebuilds with
-  the profile applied for the final wheel.
 - [CHANGELOG.md](CHANGELOG.md): Keep-a-Changelog-style release notes.
   The `Build wheels` workflow extracts the section for the pushed tag
   via `.github/scripts/extract_changelog.py` and uses it as the body
@@ -227,11 +220,6 @@ the second targets anyone touching the C core.
   `total=0`. Use a theme that only shows a spinner + rate +
   elapsed, or build one manually with just `SpinnerColumn` +
   `CountColumn` + `RateColumn`.
-- **Install a PGO wheel on Windows if you're squeezing every ns.**
-  `build_pgo.bat` produces a profile-guided optimized wheel that's
-  measurably faster on the peak it/s benchmark than the plain MSVC
-  build. Irrelevant for display-on workloads which are dominated
-  by the render thread, but visible on tight no-display loops.
 - **Free-threaded builds.** `cp313t` / `cp314t` wheels exist on
   PyPI. On a no-GIL interpreter, `Tracker.tp_iternext` still does
   the same atomic `fetch_add`, and producer threads scale almost

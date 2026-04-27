@@ -1,16 +1,5 @@
-import os
 import sys
 from setuptools import setup, Extension
-
-# PGO mode selection via env var BARFLOW_PGO:
-#   (unset)    -- standard build (default)
-#   "generate" -- MSVC: /GENPROFILE instrumented build (no /LTCG, no /OPT:REF/ICF)
-#                 GCC/Clang: -fprofile-generate
-#   "use"      -- MSVC: /USEPROFILE optimized build (merged .pgd must exist)
-#                 GCC/Clang: -fprofile-use
-BARFLOW_PGO = os.environ.get("BARFLOW_PGO", "").strip().lower()
-if BARFLOW_PGO and BARFLOW_PGO not in ("generate", "use"):
-    raise SystemExit(f"BARFLOW_PGO must be 'generate' or 'use', got: {BARFLOW_PGO!r}")
 
 # -----------------------------------------------------------------------------
 # Aggressive (but portable) build optimization flags for barflow._core
@@ -43,12 +32,6 @@ if BARFLOW_PGO and BARFLOW_PGO not in ("generate", "use"):
 #   /GS-         -- Disables stack buffer security cookies; security regression.
 #   /arch:AVX2   -- Would break wheels on pre-Haswell CPUs (we ship binaries).
 #   /fp:fast     -- We don't do heavy FP; not worth the semantic changes.
-#
-# PGO (profile-guided optimization):
-#   Set BARFLOW_PGO=generate to produce an instrumented build, run the
-#   training workload (benchmarks/pgo_train.py), then set BARFLOW_PGO=use
-#   to produce the final optimized build. Scripts build_pgo.bat (Windows)
-#   and build_pgo.sh (POSIX) automate the three-step flow.
 #
 # GCC / Clang (POSIX) flags:
 #   -std=c++17          -- C++17 language level.
@@ -97,27 +80,6 @@ if sys.platform == "win32":
         "/DEBUG:NONE",
     ]
     libraries = ["kernel32"]
-    if BARFLOW_PGO == "generate":
-        # Instrumented build: /LTCG:PGINSTRUMENT replaces plain /LTCG and
-        # /GENPROFILE inserts probes. /OPT:REF/ICF are incompatible with
-        # instrumentation and would prevent .pgc generation, so strip them.
-        extra_link_args = [
-            "/LTCG:PGINSTRUMENT",
-            "/GENPROFILE",
-            "/DEBUG:NONE",
-        ]
-    elif BARFLOW_PGO == "use":
-        # Optimized build: consume merged profile data (.pgd) alongside the
-        # link. /LTCG:PGOPTIMIZE + /USEPROFILE is the standard pair.
-        # MSVC requires /OPT:REF/ICF to match between GENPROFILE and
-        # USEPROFILE links — since the instrument build can't use them,
-        # the use build must also omit them. PGO's own dead-code folding
-        # (based on profile data) largely compensates.
-        extra_link_args = [
-            "/LTCG:PGOPTIMIZE",
-            "/USEPROFILE",
-            "/DEBUG:NONE",
-        ]
 elif sys.platform == "darwin":
     extra_compile_args = [
         "-std=c++17",
@@ -133,12 +95,6 @@ elif sys.platform == "darwin":
         "-Wl,-dead_strip",
     ]
     libraries = []
-    if BARFLOW_PGO == "generate":
-        extra_compile_args.append("-fprofile-generate")
-        extra_link_args.append("-fprofile-generate")
-    elif BARFLOW_PGO == "use":
-        extra_compile_args.append("-fprofile-use")
-        extra_link_args.append("-fprofile-use")
 else:
     # Linux / other POSIX
     extra_compile_args = [
@@ -156,12 +112,6 @@ else:
         "-Wl,--gc-sections",
     ]
     libraries = []
-    if BARFLOW_PGO == "generate":
-        extra_compile_args.append("-fprofile-generate")
-        extra_link_args.append("-fprofile-generate")
-    elif BARFLOW_PGO == "use":
-        extra_compile_args.append("-fprofile-use")
-        extra_link_args.append("-fprofile-use")
 
 ext = Extension(
     "barflow._core",

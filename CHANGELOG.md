@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Performance tips and hot-path invariants in `llms.txt`.** New
+  "Performance tips & best practices" section captures the producer
+  cacheline contract, `memory_order_relaxed` rationale, render-thread
+  GIL discipline, and contributor rules for `_core.cpp` so future
+  changes don't accidentally regress the hot path.
+- **Greatly expanded preset libraries.** ~43 new theme factories in
+  `themes.py` (`vaporwave`, `synthwave`, `lightning`, `plasma`,
+  `acid`, `midnight`, `ember`, `amber_crt`, `miami`, `gold_rush`,
+  `alien`, `deep_sea`, `magma`, `void`, `chevron`, …); ~17 new
+  spinner frame sets in `spinners.py` (`pulse`, `spark`, `thunder`,
+  `diamond`, `wedges`, `hex`, `moon`, `weather`, `rocket`,
+  `heartbeat`, `glitch`, `loading`, `slash`, `caret`, …); additional
+  glyph dictionaries in `bar_styles.py`.
+
+### Changed
+
+- **Render thread does fewer per-frame UTF-8 walks.** Per-column cell
+  widths (`count_display_cells`) are now filled inline as each column
+  is rendered and reused by the delta-emit and flex-collapse paths,
+  eliminating a redundant measure pass that ran every frame
+  (`_core.cpp`).
+- **Column-pipeline flags cached on `ProgressState`.**
+  `has_spinner_col`, `has_callback_col`, and `flex_bar_idx` are
+  computed once at column setup. `render_frame` and `render_loop` no
+  longer re-scan `st->columns` on every frame and every condition-
+  variable wakeup (`_core.cpp`).
+- **`types.SimpleNamespace` import is now lazy.** The C extension
+  loads `types` on first `CallbackColumn` render rather than at
+  module-init, so users who never construct a callback column don't
+  pay the `import types` cost on `import barflow` (`_core.cpp`).
+- **Iter 3 (auto-width bars) marked done in `ITERATIONS.md`** —
+  retroactively checked off after verifying the flex-bar path was
+  already implemented across earlier column work.
+- **`__version__` bump** + `llms.txt` drift fixes.
+
+### Removed
+
+- **Profile-Guided Optimization (PGO) infrastructure.** PGO did not
+  produce a measurable speedup vs. the plain `/O2 /Ob3 /GL /LTCG`
+  release build, and the maintenance overhead (instrumented build
+  step, training workload, separate Windows/POSIX driver scripts,
+  cibuildwheel orchestration) was not justified. Removed:
+  `build_pgo.bat`, `build_pgo.sh`, `benchmarks/pgo_train.py`,
+  `.github/scripts/cibw_pgo_train.sh`, `BARFLOW_PGO`/`BARFLOW_PGO_DIR`
+  env-var handling in `setup.py`, the `CIBW_BEFORE_BUILD_LINUX` +
+  `CIBW_ENVIRONMENT_LINUX` PGO entries in `wheels.yml`, and all PGO
+  references from `llms.txt`. Wheels now ship as plain release
+  builds.
+- **Dead `kBlockChars[9]` array** in `_core.cpp` — vestige from the
+  pre-glyph design, never referenced after the move to per-column
+  glyph tables.
+
 ## [0.2.1] — 2026-04-11
 
 ### Added
