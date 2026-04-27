@@ -8,7 +8,7 @@ asyncio wrapper are lazy-loaded via `__getattr__` on first access.
 from . import _core
 from ._core import Tracker
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __all__ = ["Progress", "Tracker", "track", "__version__"]
 
 

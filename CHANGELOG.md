@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-04-27
+
 ### Added
 
 - **Performance tips and hot-path invariants in `llms.txt`.** New
@@ -124,6 +126,7 @@ Initial public release.
   (x86_64 + arm64), and Linux (manylinux_2_28 + musllinux_1_2,
   x86_64 + aarch64). Source distribution published alongside.
 
-[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/NevermindNilas/barflow/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/NevermindNilas/barflow/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/NevermindNilas/barflow/releases/tag/v0.2.0
