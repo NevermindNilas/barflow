@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Test suite.** First `pytest` suite (89 tests) covering the pure-Python
+  surface — `style` SGR parsing, the `spinners` DSL, `bar_styles`/`columns`
+  factories, every `themes` preset resolving, seed-reproducible `random_theme`
+  — plus core behavior reachable from Python: counter/multi-task state via the
+  `completed`/`n_tasks` getters, and computed `percentage`/`fraction` (zero-total
+  sentinel, overshoot clamp) read through a `CallbackColumn` snapshot. Added a
+  `test` optional-dependency extra and pytest config to `pyproject.toml`.
+
 ## [0.3.1] — 2026-05-24
 
 ### Added
