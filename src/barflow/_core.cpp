@@ -244,6 +244,14 @@ struct ProgressState {
     std::thread             render_thread;
     std::once_flag          close_once;
 
+    // pause()/resume() let an external writer (e.g. an output redirector)
+    // suspend the render thread, emit lines on the cleared bar area, and
+    // then have the bar repainted below. `paused` is checked by the render
+    // loop on every wakeup; `force_render` makes the first frame after
+    // resume repaint even if no counter moved while paused.
+    std::atomic<bool>       paused{false};
+    bool                    force_render{false};   // guarded by render_mtx
+
     double min_interval{0.05};
     bool   disable{false};
     bool   vt_enabled{false};
@@ -1340,11 +1348,17 @@ void render_loop(ProgressState* st) {
         st->render_cv.wait_for(lock, interval);
         if (!st->running.load(std::memory_order_acquire)) break;
 
+        // Suspended for external writing: do not touch the terminal until
+        // resume() clears the flag. pause() already erased the bar area, so
+        // the external writer owns the screen meanwhile.
+        if (st->paused.load(std::memory_order_acquire)) continue;
+
         // Render unconditionally if there is a spinner (it animates even
-        // with no producer progress); otherwise only if counters moved.
-        // The spinner flag is cached at column setup so we don't re-scan
-        // the column vector on every wakeup (every `min_interval`).
-        bool any_dirty = st->has_spinner_col;
+        // with no producer progress) or if a resume forced a repaint;
+        // otherwise only if counters moved. The spinner flag is cached at
+        // column setup so we don't re-scan the column vector on every
+        // wakeup (every `min_interval`).
+        bool any_dirty = st->has_spinner_col || st->force_render;
         if (!any_dirty) {
             for (auto& t : st->tasks) {
                 if (t->completed.load(std::memory_order_acquire) != t->last_snapshot) {
@@ -1353,7 +1367,10 @@ void render_loop(ProgressState* st) {
                 }
             }
         }
-        if (any_dirty) render_frame(st);
+        if (any_dirty) {
+            render_frame(st);
+            st->force_render = false;
+        }
     }
     // Final frame, still under the lock.
     render_frame(st);
@@ -1948,6 +1965,65 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
     Py_RETURN_NONE;
 }
 
+// pause() — suspend the render thread and erase the bar area, leaving the
+// cursor at column 0 of the cleared region so an external writer can emit
+// lines there without the bar repainting on top. Mirrors the walk-back +
+// erase that write_above performs. Idempotent and safe to call when the bar
+// is disabled or closed (no-op). Pairs with resume().
+PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
+    auto* st = self->state;
+    if (st->disable || st->closed) Py_RETURN_NONE;
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        // Acquiring render_mtx guarantees no frame is mid-flight: the render
+        // loop only holds the lock outside its cv wait, so once we hold it
+        // the last frame is fully written.
+        st->paused.store(true, std::memory_order_release);
+
+        if (st->vt_enabled) {
+            std::string& buf = st->scratch;
+            buf.clear();
+            int term_w = query_terminal_width(st);
+            if (!st->last_task_cells.empty()) {
+                int total_rows = 0;
+                for (int c : st->last_task_cells) {
+                    int r = (term_w > 0) ? ((c + term_w - 1) / term_w) : 1;
+                    if (r < 1) r = 1;
+                    total_rows += r;
+                }
+                if (total_rows > 0) {
+                    buf.append("\x1b[", 2);
+                    char tmp[20];
+                    size_t n = u64_to_chars(tmp, static_cast<uint64_t>(total_rows));
+                    buf.append(tmp, n);
+                    buf.push_back('A');
+                }
+            }
+            buf.push_back('\r');
+            buf.append("\x1b[J", 3);   // erase from cursor to end of screen
+            write_bytes(st, buf.data(), buf.size());
+            st->last_rendered_lines = 0;
+            st->last_task_cells.clear();
+            st->delta_valid = false;   // resume repaints from scratch
+        }
+    }
+    Py_RETURN_NONE;
+}
+
+// resume() — undo pause(): clear the suspend flag and force the next render
+// loop wakeup to repaint the bar below whatever the external writer emitted.
+PyObject* Progress_resume(PyProgress* self, PyObject* /*args*/) {
+    auto* st = self->state;
+    if (st->disable || st->closed) Py_RETURN_NONE;
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        st->paused.store(false, std::memory_order_release);
+        st->force_render = true;
+    }
+    st->render_cv.notify_one();
+    Py_RETURN_NONE;
+}
+
 PyObject* Progress_get_completed(PyProgress* self, void* /*closure*/) {
     Task* t = self->state->task0.load(std::memory_order_acquire);
     uint64_t v = t ? t->completed.load(std::memory_order_relaxed) : 0;
@@ -1989,6 +2065,10 @@ PyMethodDef Progress_methods[] = {
         "Force an immediate render frame."},
     {"write_above",reinterpret_cast<PyCFunction>(Progress_write_above),
         METH_O, "Emit text above the bar area without tearing."},
+    {"pause",      reinterpret_cast<PyCFunction>(Progress_pause),   METH_NOARGS,
+        "Suspend the render thread and clear the bar so external writes are clean."},
+    {"resume",     reinterpret_cast<PyCFunction>(Progress_resume),  METH_NOARGS,
+        "Resume rendering after pause(), repainting the bar."},
     {nullptr, nullptr, 0, nullptr}
 };
 

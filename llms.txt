@@ -33,7 +33,8 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
 - `barflow.Progress(*columns, total=None, desc=None, theme=None,
   disable=False, min_interval=0.05, capture_output=False)` — context
   manager for manual `tick()` / `advance()` / `add_task()` / `update()`
-  / `write_above()` flows. Resolves columns + themes in Python, then
+  / `write_above()` / `pause()` / `resume()` flows. Resolves columns +
+  themes in Python, then
   calls into `_core.Progress`.
 - `barflow.Tracker` — the C iterator type, re-exported for advanced use.
 - `barflow.aio.atrack(aiter, ...)` — async-iterable wrapper.
@@ -87,6 +88,10 @@ Key public API (see `src/barflow/__init__.py` for the full surface):
     `WriteConsoleW` (Windows, UTF-16 transcoded, 32 KB chunks) or
     `write(2)` (POSIX).
   - `write_above()` primitive for interleaving user prints.
+  - `pause()` / `resume()` to suspend the render thread and clear the
+    bar area so an external writer (e.g. an output redirector) can emit
+    lines without the autonomous render thread tearing them, then
+    repaint. `pause()` checks `vt_enabled` before erasing.
   - Ten built-in column types decoded from Python 5-tuples: `TEXT`,
     `DESCRIPTION`, `BAR`, `PERCENT`, `COUNT`, `RATE`, `ELAPSED`, `ETA`,
     `SPINNER`, `CALLBACK`. Only `CALLBACK` re-enters Python on the
