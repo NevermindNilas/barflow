@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Lowered the minimum Python to 3.10** (was 3.13). The C core already
+  version-gated its only 3.12+ fast-path API (`_PyLong_IsCompact` /
+  `_PyLong_CompactValue`) behind `PY_VERSION_HEX` with a public-API
+  fallback, and the free-threaded `PyUnstable_Module_SetGIL` call is
+  guarded by `Py_GIL_DISABLED`, so nothing blocked older interpreters.
+  `requires-python`, the PyPI classifiers, the README, and the
+  cibuildwheel matrix now cover CPython 3.10–3.14. Verified by building
+  and smoke-testing the extension on 3.10, 3.11, and 3.12.
+
 ## [0.2.2] — 2026-04-27
 
 ### Added
