@@ -45,12 +45,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+          cache: 'pip'
 
       - name: Install cibuildwheel
         run: python -m pip install --upgrade pip cibuildwheel==3.4.1
 
+      # Cache cibuildwheel's downloaded interpreters / build tools. This is the
+      # repeated per-job cost (cibuildwheel fetches the target CPython for every
+      # matrix entry); the actual C++ compile is ~1-3s and not worth caching.
+      - name: Cache cibuildwheel downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cibw-cache
+          key: cibw-${{ matrix.label }}-${{ hashFiles('pyproject.toml', 'setup.py') }}
+          restore-keys: |
+            cibw-${{ matrix.label }}-
+
       - name: Build wheels
         env:
+          CIBW_CACHE_DIR: ${{ github.workspace }}/.cibw-cache
           CIBW_BUILD: cp${{ matrix.python }}-*
           CIBW_ARCHS: ${{ matrix.archs }}
           CIBW_ENABLE: ${{ matrix.free_threaded && 'cpython-freethreading' || '' }}
@@ -71,6 +84,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+          cache: 'pip'
       - run: python -m pip install --upgrade pip build
       - run: python -m build --sdist
       - uses: actions/upload-artifact@v4
