@@ -21,6 +21,8 @@ matches their app's visual identity.
 
 from __future__ import annotations
 
+import random as _random
+
 from . import columns as c
 
 
@@ -779,6 +781,22 @@ def training():
 
 
 # ---------------------------------------------------------------------------
+# Meta
+# ---------------------------------------------------------------------------
+
+def random_theme():
+    """Pick a random theme each call and return its columns."""
+    # Collapse aliases, drop self, so every pick is a distinct real theme.
+    # dict.fromkeys de-dupes by identity while preserving THEMES' insertion
+    # order — a plain set would iterate in a hash-randomized order, defeating
+    # reproducibility under a seeded RNG.
+    pool = list(dict.fromkeys(
+        fn for fn in THEMES.values() if fn is not random_theme
+    ))
+    return _random.choice(pool)()
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -875,6 +893,9 @@ THEMES = {
     "downloading":  downloading,
     "building":     building,
     "training":     training,
+
+    # Meta
+    "random":       random_theme,
 }
 
 
@@ -922,4 +943,6 @@ __all__ = [
     "github_dark", "discord", "dracula", "solarized", "nord", "gruvbox",
     # Specialized
     "tiny", "detailed", "downloading", "building", "training",
+    # Meta
+    "random_theme",
 ]

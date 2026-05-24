@@ -61,6 +61,7 @@ skip = ["*-musllinux_i686", "*-win32"]
 # The C++17 core uses aligned new/delete, which Clang only emits for a
 # deployment target of macOS 10.13+. CPython 3.12+ already defaults the
 # x86_64 target high enough, but 3.10/3.11 default to 10.9 and fail to
-# compile. Pin the floor to 10.13 for every macOS build (arm64 is always
-# 11.0+ regardless, so this only lifts the x86_64 leg).
-environment = { MACOSX_DEPLOYMENT_TARGET = "10.13" }
+# compile. cibuildwheel now enforces a 10.15 floor, so pin to that for
+# every macOS build (arm64 is always 11.0+ regardless, so this only lifts
+# the x86_64 leg). 10.15 still satisfies the aligned-new requirement.
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.15" }
