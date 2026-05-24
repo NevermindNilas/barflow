@@ -33,10 +33,10 @@ def test_update_targets_named_task():
         a = p.add_task(total=10, desc="a")
         b = p.add_task(total=10, desc="b")
         p.update(b, 4)
-        # task 0 is the implicit default; named tasks start at the next id.
-        assert p.completed == 0      # getter reports task 0
-        # b advanced independently — verified via snapshot below.
+        # add_task assigns sequential ids starting at 0; updating task b
+        # leaves task 0 (which `completed` reports) untouched.
         assert (a, b) == (0, 1)
+        assert p.completed == 0      # getter reports task 0, not b
 
 
 # ---- multi-task ------------------------------------------------------------

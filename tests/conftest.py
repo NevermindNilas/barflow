@@ -13,7 +13,9 @@ introspection hooks the core exposes:
 
 The render thread is asynchronous and throttled, so `capture_snapshots`
 forces a frame with `refresh()` and polls until the callback has fired
-rather than sleeping a fixed amount (which would flake under load).
+rather than sleeping a fixed amount (which would flake under load). It
+runs with `disable=True`: that suppresses the render thread and any test
+output while still firing the CallbackColumn on each explicit `refresh()`.
 """
 
 from __future__ import annotations
@@ -48,17 +50,21 @@ def capture_snapshots(total, drive, *, timeout=2.0):
         })
         return ""
 
-    p = barflow.Progress(C.CallbackColumn(_cb), total=total, disable=False)
+    p = barflow.Progress(C.CallbackColumn(_cb), total=total, disable=True)
     p.__enter__()
     try:
         drive(p)
+        # Capture a snapshot taken *after* drive() completed. Record the
+        # count first so a frame that may have fired during enter/drive
+        # can't be mistaken for the post-drive frame we force below.
+        baseline = len(snaps)
         deadline = time.monotonic() + timeout
-        while not snaps and time.monotonic() < deadline:
+        while len(snaps) == baseline and time.monotonic() < deadline:
             p.refresh()
             time.sleep(0.01)
     finally:
         p.__exit__(None, None, None)
 
-    if not snaps:
-        raise AssertionError("CallbackColumn never fired a frame")
+    if len(snaps) == baseline:
+        raise AssertionError("CallbackColumn never fired a post-drive frame")
     return snaps[-1]
