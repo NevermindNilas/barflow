@@ -39,12 +39,19 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
 [project.urls]
 Homepage      = "https://github.com/NevermindNilas/barflow"
 Repository    = "https://github.com/NevermindNilas/barflow"
 Issues        = "https://github.com/NevermindNilas/barflow/issues"
 Changelog     = "https://github.com/NevermindNilas/barflow/releases"
 Documentation = "https://github.com/NevermindNilas/barflow/blob/main/docs/DESIGN.md"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
