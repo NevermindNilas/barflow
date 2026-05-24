@@ -56,3 +56,11 @@ where = ["src"]
 build-verbosity = 1
 test-command = 'python -c "import barflow; list(barflow.track(range(1000)))"'
 skip = ["*-musllinux_i686", "*-win32"]
+
+[tool.cibuildwheel.macos]
+# The C++17 core uses aligned new/delete, which Clang only emits for a
+# deployment target of macOS 10.13+. CPython 3.12+ already defaults the
+# x86_64 target high enough, but 3.10/3.11 default to 10.9 and fail to
+# compile. Pin the floor to 10.13 for every macOS build (arm64 is always
+# 11.0+ regardless, so this only lifts the x86_64 leg).
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.13" }
