@@ -1281,6 +1281,14 @@ void render_frame(ProgressState* st) {
             if (pending_skip > 0) {
                 append_cursor_right(buf, pending_skip);
             }
+            // The cursor now sits at the end of this row's actual content
+            // (re-emitted columns end there; trailing matched columns were
+            // CUF-skipped to their end). Erase from here to end of line so a
+            // column that SHRANK since last frame — e.g. a variable-width
+            // callback/postfix going from "subprocess" to "sqlite3" — doesn't
+            // leave stale trailing characters ("sqlite3sses"). EL0 (\x1b[K)
+            // clears only rightward, so already-emitted columns are safe.
+            if (st->vt_enabled) buf.append("\x1b[K", 3);
         } else {
             // Full emit: concatenate every visible column's bytes.
             // When use_delta was true globally we skipped the up-front
@@ -1813,16 +1821,27 @@ PyObject* Progress_set_total(PyProgress* self,
     if (PyErr_Occurred()) return nullptr;
     uint64_t total = 0;
     if (barflow_pylong_to_u64(args[1], &total) < 0) return nullptr;
+    // Drop the GIL around render_mtx: render_frame holds the lock while a
+    // CallbackColumn re-enters Python, so a GIL-holding caller blocked here
+    // would deadlock. Defer the out-of-range error until the GIL is back.
+    bool oob = false;
+    auto* st = self->state;
+    Py_BEGIN_ALLOW_THREADS
     {
-        std::lock_guard<std::mutex> lg(self->state->render_mtx);
+        std::lock_guard<std::mutex> lg(st->render_mtx);
         if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= self->state->tasks.size()) {
-            PyErr_SetString(PyExc_IndexError, "task_id out of range");
-            return nullptr;
+            static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            st->tasks[static_cast<size_t>(task_id)]->total = total;
         }
-        self->state->tasks[static_cast<size_t>(task_id)]->total = total;
     }
-    self->state->render_cv.notify_one();
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return nullptr;
+    }
+    st->render_cv.notify_one();
     Py_RETURN_NONE;
 }
 
@@ -1847,17 +1866,27 @@ PyObject* Progress_set_task_description(PyProgress* self,
     Py_ssize_t dlen = 0;
     const char* ds = PyUnicode_AsUTF8AndSize(args[1], &dlen);
     if (!ds) return nullptr;
+    // ds points into args[1]'s cached UTF-8 buffer; args[1] is kept alive by
+    // the caller and not mutated, so reading it with the GIL dropped is safe.
+    bool oob = false;
+    auto* st = self->state;
+    Py_BEGIN_ALLOW_THREADS
     {
-        std::lock_guard<std::mutex> lg(self->state->render_mtx);
+        std::lock_guard<std::mutex> lg(st->render_mtx);
         if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= self->state->tasks.size()) {
-            PyErr_SetString(PyExc_IndexError, "task_id out of range");
-            return nullptr;
+            static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            st->tasks[static_cast<size_t>(task_id)]->description.assign(
+                ds, static_cast<size_t>(dlen));
         }
-        self->state->tasks[static_cast<size_t>(task_id)]->description.assign(
-            ds, static_cast<size_t>(dlen));
     }
-    self->state->render_cv.notify_one();
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return nullptr;
+    }
+    st->render_cv.notify_one();
     Py_RETURN_NONE;
 }
 
@@ -1871,16 +1900,23 @@ PyObject* Progress_set_description(PyProgress* self, PyObject* desc_obj) {
     Py_ssize_t dlen = 0;
     const char* ds = PyUnicode_AsUTF8AndSize(desc_obj, &dlen);
     if (!ds) return nullptr;
+    bool empty = false;
+    auto* st = self->state;
+    Py_BEGIN_ALLOW_THREADS
     {
-        std::lock_guard<std::mutex> lg(self->state->render_mtx);
-        if (self->state->tasks.empty()) {
-            PyErr_SetString(PyExc_IndexError, "no tasks");
-            return nullptr;
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (st->tasks.empty()) {
+            empty = true;
+        } else {
+            st->tasks[0]->description.assign(ds, static_cast<size_t>(dlen));
         }
-        self->state->tasks[0]->description.assign(
-            ds, static_cast<size_t>(dlen));
     }
-    self->state->render_cv.notify_one();
+    Py_END_ALLOW_THREADS
+    if (empty) {
+        PyErr_SetString(PyExc_IndexError, "no tasks");
+        return nullptr;
+    }
+    st->render_cv.notify_one();
     Py_RETURN_NONE;
 }
 
@@ -1909,6 +1945,11 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
     const char* text = PyUnicode_AsUTF8AndSize(text_obj, &len);
     if (!text) return nullptr;
 
+    // Drop the GIL around render_mtx (see set_total): render_frame holds the
+    // lock while a CallbackColumn re-enters Python. `text` points into
+    // text_obj's cached UTF-8 buffer, which stays valid (caller holds a ref,
+    // no mutation) while the GIL is released.
+    Py_BEGIN_ALLOW_THREADS
     {
         std::lock_guard<std::mutex> lg(self->state->render_mtx);
         auto* st = self->state;
@@ -1961,6 +2002,7 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
         // — invalidate so the next render_frame does a full emit.
         st->delta_valid = false;
     }
+    Py_END_ALLOW_THREADS
     self->state->render_cv.notify_one();
     Py_RETURN_NONE;
 }
@@ -1973,6 +2015,13 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
 PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
     auto* st = self->state;
     if (st->disable || st->closed) Py_RETURN_NONE;
+    // Release the GIL before taking render_mtx. The render thread holds
+    // render_mtx across render_frame, which re-enters Python (PyGILState)
+    // for any CallbackColumn — so a GIL-holding caller that blocked on
+    // render_mtx here would deadlock against the render thread waiting on
+    // the GIL. Dropping the GIL lets the render thread finish and release
+    // the lock. write_bytes touches no Python state, so it is GIL-free safe.
+    Py_BEGIN_ALLOW_THREADS
     {
         std::lock_guard<std::mutex> lg(st->render_mtx);
         // Acquiring render_mtx guarantees no frame is mid-flight: the render
@@ -2007,6 +2056,7 @@ PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
             st->delta_valid = false;   // resume repaints from scratch
         }
     }
+    Py_END_ALLOW_THREADS
     Py_RETURN_NONE;
 }
 
@@ -2015,11 +2065,16 @@ PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
 PyObject* Progress_resume(PyProgress* self, PyObject* /*args*/) {
     auto* st = self->state;
     if (st->disable || st->closed) Py_RETURN_NONE;
+    // Drop the GIL before render_mtx for the same reason as pause(): the
+    // render thread may hold render_mtx while waiting on the GIL inside a
+    // CallbackColumn.
+    Py_BEGIN_ALLOW_THREADS
     {
         std::lock_guard<std::mutex> lg(st->render_mtx);
         st->paused.store(false, std::memory_order_release);
         st->force_render = true;
     }
+    Py_END_ALLOW_THREADS
     st->render_cv.notify_one();
     Py_RETURN_NONE;
 }

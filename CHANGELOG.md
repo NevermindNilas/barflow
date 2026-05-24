@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Deadlock when a render-thread method is called under a `CallbackColumn`.**
+  `render_frame` holds `render_mtx` while a `CallbackColumn` re-enters Python
+  via `PyGILState_Ensure`. The Python-facing mutators (`pause`, `resume`,
+  `set_total`, `set_description`, `set_task_description`, `write_above`) took
+  `render_mtx` *while holding the GIL*, so a GIL-holding caller could block on
+  the lock while the render thread blocked on the GIL — a lock-order
+  inversion that froze any multithreaded use with a callback column. They now
+  release the GIL (`Py_BEGIN_ALLOW_THREADS`) around the lock, matching
+  `refresh()`. Out-of-range errors are reported after the GIL is reacquired.
+- **Stale trailing characters when a column shrinks.** The delta render path
+  re-emitted changed columns but never erased to end of line, so a
+  variable-width trailing column (e.g. a `CallbackColumn` postfix going from
+  `subprocess` to `sqlite3`) left leftover characters (`sqlite3sses`). Each
+  delta-rendered row now ends with `\x1b[K` (erase to end of line); the cursor
+  is at the true end of content, so already-emitted columns are untouched.
+
 ## [0.3.0] — 2026-05-24
 
 ### Added
