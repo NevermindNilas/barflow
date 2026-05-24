@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-24
+
 ### Added
 
 - **`Progress.pause()` / `Progress.resume()`.** Suspend the background
@@ -151,7 +153,8 @@ Initial public release.
   (x86_64 + arm64), and Linux (manylinux_2_28 + musllinux_1_2,
   x86_64 + aarch64). Source distribution published alongside.
 
-[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/NevermindNilas/barflow/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/NevermindNilas/barflow/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/NevermindNilas/barflow/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/NevermindNilas/barflow/compare/v0.2.0...v0.2.1
