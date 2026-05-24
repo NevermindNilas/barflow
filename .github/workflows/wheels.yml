@@ -52,9 +52,9 @@ jobs:
           - { os: ubuntu-24.04-arm, python: '313t', archs: aarch64,      label: linux-cp313t-aarch64, free_threaded: true }
           - { os: ubuntu-24.04-arm, python: '314t', archs: aarch64,      label: linux-cp314t-aarch64, free_threaded: true }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -66,7 +66,7 @@ jobs:
       # repeated per-job cost (cibuildwheel fetches the target CPython for every
       # matrix entry); the actual C++ compile is ~1-3s and not worth caching.
       - name: Cache cibuildwheel downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/.cibw-cache
           key: cibw-${{ matrix.label }}-${{ hashFiles('pyproject.toml', 'setup.py') }}
@@ -83,7 +83,7 @@ jobs:
             python -c "import barflow; list(barflow.track(range(1000)))"
         run: python -m cibuildwheel --output-dir wheelhouse
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.label }}
           path: ./wheelhouse/*.whl
@@ -92,14 +92,14 @@ jobs:
     name: Build source distribution
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: 'pip'
       - run: python -m pip install --upgrade pip build
       - run: python -m build --sdist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -119,7 +119,7 @@ jobs:
       id-token: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -145,10 +145,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

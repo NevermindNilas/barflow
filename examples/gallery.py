@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import argparse
 import random
+import shutil
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 _REPO_SRC = Path(__file__).resolve().parent.parent / "src"
@@ -126,6 +128,29 @@ def extract(cols):
 
 # ----- Per-row renderer ---------------------------------------------------
 
+def cell_width(s):
+    """Display columns a glyph string occupies in a terminal.
+
+    Emoji and CJK render two columns wide; combining marks, ZWJ, and variation
+    selectors add none. Over-counting is safe here (the bar just ends a hair
+    short); under-counting is not (the row overflows and the percent clips), so
+    anything in the emoji planes is treated as width 2.
+    """
+    w = 0
+    prev = 0  # display width of the most recent base glyph
+    for ch in s:
+        cp = ord(ch)
+        if cp == 0xFE0F:  # emoji variation selector forces the base to 2 cols
+            w += 2 - prev
+            prev = 2
+            continue
+        if unicodedata.combining(ch) or cp in (0x200D, 0xFE0E):  # ZWJ, text VS
+            continue
+        prev = 2 if unicodedata.east_asian_width(ch) in ("W", "F") or cp >= 0x1F000 else 1
+        w += prev
+    return w
+
+
 def build_bar(glyphs, width, fraction):
     """Build one bar string from a 5-tuple glyphs spec at given fill fraction."""
     fill, empty, partials, left, right = glyphs
@@ -173,23 +198,65 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
         print("nothing to show.", file=sys.stderr)
         return
 
+    # Each preset is one terminal row; the redraw moves the cursor up
+    # exactly len(presets) rows every frame. If the block is taller than the
+    # rows actually free below the header, the cursor-up clamps at the top of
+    # the screen and the overflow scrolls into scrollback every frame — a wall
+    # of the duplicated top row(s). Reserve the header the caller already
+    # printed (title + blank = 2 lines), the trailing footer (1), plus a
+    # one-line safety margin, then trim to what's left.
+    HEADER_LINES, FOOTER_LINES, SAFETY = 2, 1, 1
+    term_lines = shutil.get_terminal_size().lines
+    avail = max(1, term_lines - HEADER_LINES - FOOTER_LINES - SAFETY)
+    if len(presets) > avail:
+        sys.stderr.write(
+            f"\x1b[1;93mTerminal is {term_lines} rows; showing first "
+            f"{avail} of {len(presets)} presets. Resize taller or use "
+            f"--section / --only to pick fewer.\x1b[0m\n\n"
+        )
+        presets = presets[:avail]
+
     rng = random.Random(seed)
     parts = {n: extract(themes.get(n)) for n in presets}
     speeds = {n: rng.uniform(0.6, 1.6) for n in presets}  # finish-time multiplier
     fractions = {n: 0.0 for n in presets}
     name_width = max(len(n) for n in presets)
     n_rows = len(presets)
+
+    # Cap each bar so the whole row fits one terminal line. A cell costs as many
+    # columns as its fill glyph is wide, so emoji bars (lightning's ⚡, width 2)
+    # need half the cells of an ASCII bar to occupy the same space. Without this
+    # the row overflows the right margin and — now that autowrap is off — the
+    # trailing percent is clipped clean off ("lightning … ⚡⚡ %").
+    term_cols = shutil.get_terminal_size().columns
+    for p in parts.values():
+        fill, _empty, _partials, left, right = p["bar_glyphs"]
+        glyph_w = cell_width(fill) or 1
+        spinner_w = 2 if p["spinner_frames"] else 0
+        # spinner + name + " " + bar-brackets + " 100%" + 1-col margin
+        overhead = (spinner_w + name_width + 1 + cell_width(left)
+                    + cell_width(right) + 5 + 1)
+        max_cells = max(1, (term_cols - overhead) // glyph_w)
+        p["bar_width"] = min(p["bar_width"], max_cells)
     frame_delay = 1.0 / fps
     total_frames = max(1, int(duration * fps))
 
     out = sys.stdout
-    out.write("\x1b[?25l")  # hide cursor
+    # Hide cursor and turn OFF autowrap (DECAWM). Double-width glyphs (emoji
+    # bars like lightning's ⚡, fire 🔥) can push a row past the right margin;
+    # with autowrap on the terminal folds the overflow onto a second physical
+    # line, so the row occupies 2 lines while the redraw only climbs n_rows
+    # lines — a 1-line drift per frame that scrolls the top row off as a wall.
+    # With autowrap off the overflow is clipped at the margin instead, keeping
+    # every row exactly one physical line so the cursor-up math stays exact.
+    out.write("\x1b[?25l\x1b[?7l")
     out.flush()
 
     drew_once = False
     t_start = time.perf_counter()
     try:
         for frame in range(total_frames + fps):  # extra slack so all bars hit 100%
+            frame_start = time.perf_counter()
             for n in presets:
                 step = speeds[n] / total_frames
                 fractions[n] = min(1.0, fractions[n] + step)
@@ -209,9 +276,13 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
 
             if all(f >= 1.0 for f in fractions.values()):
                 break
-            time.sleep(frame_delay)
+            # Subtract render+write+flush cost so the real frame rate tracks
+            # the target instead of (target_period + work) per frame.
+            slack = frame_delay - (time.perf_counter() - frame_start)
+            if slack > 0:
+                time.sleep(slack)
     finally:
-        out.write("\x1b[?25h")  # show cursor
+        out.write("\x1b[?7h\x1b[?25h")  # restore autowrap, show cursor
         out.flush()
 
     elapsed = time.perf_counter() - t_start
@@ -234,8 +305,8 @@ def main():
                     help="explicit preset list (overrides --section)")
     ap.add_argument("--duration", type=float, default=6.0,
                     help="approximate seconds for fastest bar to finish (default 6)")
-    ap.add_argument("--fps", type=int, default=24,
-                    help="target frames per second (default 24)")
+    ap.add_argument("--fps", type=int, default=60,
+                    help="target frames per second (default 60)")
     ap.add_argument("--seed", type=int, default=None,
                     help="seed for per-preset speed randomness")
     ap.add_argument("--list", action="store_true",
