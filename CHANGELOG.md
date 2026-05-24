@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Progress.pause()` / `Progress.resume()`.** Suspend the background
+  render thread and clear the bar area so an external writer (an output
+  redirector, a threaded tool interleaving prints) can emit lines without
+  the autonomous render thread repainting on top of them, then repaint
+  the bar below. Without this, host applications that wrap their own
+  output in a "pause the bar" block — e.g. tqdm's `external_write_mode`
+  equivalent — could not stop barflow's timer-driven render thread and
+  saw torn output under concurrency. `pause()` only emits the erase when
+  `vt_enabled`; both are no-ops when the bar is disabled or closed.
+
 ## [0.2.3] — 2026-05-24
 
 ### Changed
