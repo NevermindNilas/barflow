@@ -787,8 +787,13 @@ def training():
 def random_theme():
     """Pick a random theme each call and return its columns."""
     # Collapse aliases, drop self, so every pick is a distinct real theme.
-    pool = {fn for fn in THEMES.values() if fn is not random_theme}
-    return _random.choice(list(pool))()
+    # dict.fromkeys de-dupes by identity while preserving THEMES' insertion
+    # order — a plain set would iterate in a hash-randomized order, defeating
+    # reproducibility under a seeded RNG.
+    pool = list(dict.fromkeys(
+        fn for fn in THEMES.values() if fn is not random_theme
+    ))
+    return _random.choice(pool)()
 
 
 # ---------------------------------------------------------------------------
