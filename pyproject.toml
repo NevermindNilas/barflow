@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "barflow"
-version = "0.3.0"
+version = "0.3.1"
 description = "Fast Python progress bars with a C++ core. Windows-first."
 readme = "README.md"
 requires-python = ">=3.10"

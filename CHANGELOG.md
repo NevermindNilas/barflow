@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-24
+
+### Added
+
+- **`random` theme.** `themes.get("random")` (or `random_theme()`) picks a
+  distinct real theme on each call. Aliases are collapsed and the pick is
+  reproducible under a seeded RNG (insertion-order de-dup, not hash order).
+
+### Changed
+
+- Bumped CI actions (`checkout` v6, `setup-python` v6, `cache` v5,
+  `upload-artifact` v7, `download-artifact` v8) and lifted the macOS
+  deployment-target floor to 10.15 (cibuildwheel now enforces it; still
+  satisfies the aligned-new requirement).
+
 ### Fixed
 
+- **Gallery rendering glitches.** `examples/gallery.py` now disables autowrap
+  (DECAWM) so double-width emoji bars are clipped at the right margin instead
+  of folding onto a second physical row and scrolling the top row off; caps
+  each bar to the terminal width using per-glyph cell-width measurement; trims
+  the preset block to the rows actually free below the header; and subtracts
+  render cost from the frame delay so the real frame rate tracks the target.
 - **Deadlock when a render-thread method is called under a `CallbackColumn`.**
   `render_frame` holds `render_mtx` while a `CallbackColumn` re-enters Python
   via `PyGILState_Ensure`. Every Python-facing path that takes `render_mtx`
