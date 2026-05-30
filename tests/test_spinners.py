@@ -66,3 +66,12 @@ def test_module_exports():
     assert "SPINNERS" in spinners.__all__
     for fn in ("frame", "scrolling", "bouncing", "sequential", "alongside"):
         assert fn in spinners.__all__
+
+
+def test_factory_annotations_resolve():
+    # The factory return/param annotations must reference runtime-resolvable
+    # names (list / collections.abc.Sequence), so introspection tooling that
+    # calls typing.get_type_hints does not raise NameError.
+    import typing
+    for fn in (frame, scrolling, bouncing, sequential, alongside):
+        typing.get_type_hints(fn)

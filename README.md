@@ -298,9 +298,10 @@ free-threaded `cp313t` / `cp314t` builds.
   UTF-16 transcoded `WriteConsoleW` chunked at 32 KB, legacy-console
   fallback. No `colorama` dependency. A reusable `wscratch`
   transcoding buffer means steady-state frames are zero-alloc.
-- **Multi-task + columns.** 9 built-in column types
-  (description/bar/percent/count/rate/elapsed/eta/spinner/text),
-  rich-style column API, themes, ANSI cursor stacking for nested bars.
+- **Multi-task + columns.** 10 built-in column types
+  (description/bar/percent/count/rate/elapsed/eta/spinner/text — all in
+  C++ — plus a Python-rendered callback column), rich-style column API,
+  themes, ANSI cursor stacking for nested bars.
   `Progress.set_description(str)` and `set_task_description(task_id, str)`
   expose metadata churn without touching the lock-free hot path.
 - **Spinner DSL.** Compositional factories

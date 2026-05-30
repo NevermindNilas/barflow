@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import barflow
 
 
@@ -46,3 +48,18 @@ def test_track_with_columns_routes_through_python_progress():
 def test_track_with_theme():
     out = list(barflow.track(range(3), disable=True, theme="classic"))
     assert out == [0, 1, 2]
+
+
+def test_track_rejects_nonzero_task_id():
+    # track() only builds task 0; a non-zero task_id fails fast with a
+    # ValueError rather than an opaque IndexError from the C core.
+    with pytest.raises(ValueError):
+        barflow.track(range(3), disable=True, task_id=1)
+
+
+def test_track_reexhaustion_is_empty_and_safe():
+    t = barflow.track(range(4), disable=True)
+    assert list(t) == [0, 1, 2, 3]
+    # The Tracker closed its owned progress on exhaustion; a second pass
+    # yields nothing and must not raise (double-close is guarded).
+    assert list(t) == []
