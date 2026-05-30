@@ -13,9 +13,11 @@ returns a `list[str]`, which becomes the `frames` field of a
 
 from __future__ import annotations
 
-# Type names `List` and `Sequence` used in signatures are deferred by
-# `from __future__ import annotations` above, so importing them at runtime
-# is unnecessary. Keeping this module's cold import tight.
+from collections.abc import Sequence
+
+# Signatures use the built-in `list[str]` generic and `Sequence` from
+# collections.abc — both resolvable at runtime, so `typing.get_type_hints`
+# (and doc/validation tooling) won't choke. `Sequence` is a cheap import.
 
 # ---- Built-in spinners -------------------------------------------------
 
@@ -91,12 +93,12 @@ SPINNERS: dict[str, list[str]] = {
 
 # ---- Compositional factories -------------------------------------------
 
-def frame(*frames: str) -> List[str]:
+def frame(*frames: str) -> list[str]:
     """Raw sequential frames. Shape-match for alive-progress's `frame_spinner_factory`."""
     return list(frames)
 
 
-def scrolling(chars: str, length: int = 6, pad: str = " ") -> List[str]:
+def scrolling(chars: str, length: int = 6, pad: str = " ") -> list[str]:
     """Slide `chars` through a window of `length`, pad outside."""
     if length <= 0:
         raise ValueError("length must be positive")
@@ -107,14 +109,14 @@ def scrolling(chars: str, length: int = 6, pad: str = " ") -> List[str]:
     return frames
 
 
-def bouncing(chars: str, length: int = 6, pad: str = " ") -> List[str]:
+def bouncing(chars: str, length: int = 6, pad: str = " ") -> list[str]:
     """Scroll `chars` across a window, then reverse."""
     forward = scrolling(chars, length=length, pad=pad)
     backward = list(reversed(forward[1:-1]))
     return forward + backward
 
 
-def sequential(*specs: Sequence[str]) -> List[str]:
+def sequential(*specs: Sequence[str]) -> list[str]:
     """Concatenate several frame lists end-to-end."""
     out: list[str] = []
     for spec in specs:
@@ -122,7 +124,7 @@ def sequential(*specs: Sequence[str]) -> List[str]:
     return out
 
 
-def alongside(*specs: Sequence[str], sep: str = "") -> List[str]:
+def alongside(*specs: Sequence[str], sep: str = "") -> list[str]:
     """Run several animations side-by-side, stepping them together."""
     if not specs:
         return []
@@ -131,6 +133,42 @@ def alongside(*specs: Sequence[str], sep: str = "") -> List[str]:
     for i in range(n):
         frames.append(sep.join(s[i % len(s)] for s in specs))
     return frames
+
+
+# ---- Procedural built-ins (richer alive-progress-style motion) ----------
+
+def _wave(cells: int = 6, frames: int = 14, glyphs: str = "▁▂▃▄▅▆▇█") -> list[str]:
+    """A traveling sine wave `cells` wide over `frames` steps.
+
+    Each frame is a row of block-height glyphs sampled from a sine whose
+    phase advances with both time and column, so the crest sweeps sideways —
+    the undulating-water motion alive-progress's `waves` family is known for.
+    """
+    import math
+
+    n = len(glyphs)
+    out: list[str] = []
+    for t in range(frames):
+        row = []
+        for x in range(cells):
+            phase = (t / frames + x / cells) * 2.0 * math.pi
+            lvl = int((math.sin(phase) * 0.5 + 0.5) * (n - 1) + 0.5)
+            row.append(glyphs[lvl])
+        out.append("".join(row))
+    return out
+
+
+# Built from the DSL above, so these stay in sync with the same compositional
+# primitives users get for their own animations. All glyphs are single-cell,
+# so every frame of a given spinner has a constant display width.
+SPINNERS.update({
+    "wave":      _wave(6, 14),                          # undulating block wave
+    "wave_wide": _wave(10, 18),                         # wider, slower wave
+    "dots_wave": _wave(6, 12, glyphs="⠀⡀⡄⡆⡇⣇⣧⣷⣿"),  # braille fill wave
+    "bounce":    bouncing("●", length=7),              # ball in a track
+    "scan":      bouncing("▓█▓", length=9, pad="░"),   # blob sweep over a track
+    "flow":      scrolling("≡≡≡  ", length=6),         # pipes flowing rightward
+})
 
 
 __all__ = [

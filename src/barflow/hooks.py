@@ -73,6 +73,20 @@ class _ProgressStream:
         else:
             self._progress.write_above(text)
 
+    def drain(self):
+        """Emit everything still buffered, including a trailing line that
+        has no newline. `flush()` deliberately holds a newline-less tail
+        (standard line-buffering), so without this a final
+        `print("done", end="")` would be lost when capture is torn down.
+        `write_above` appends the missing newline for us.
+        """
+        if not self._buf:
+            return
+        text = "".join(self._buf)
+        self._buf.clear()
+        if text:
+            self._progress.write_above(text)
+
     def isatty(self):
         try:
             return self._orig.isatty()
@@ -92,27 +106,36 @@ class StdoutCapture:
         self._cap_err = capture_stderr
         self._saved_out = None
         self._saved_err = None
+        # The proxy objects we install, kept so uninstall can drain their
+        # buffers even if user code reassigned sys.stdout in the meantime.
+        self._proxy_out = None
+        self._proxy_err = None
 
     def install(self):
         if self._cap_out:
             self._saved_out = sys.stdout
-            sys.stdout = _ProgressStream(self._progress, self._saved_out, "stdout")
+            self._proxy_out = _ProgressStream(self._progress, self._saved_out, "stdout")
+            sys.stdout = self._proxy_out
         if self._cap_err:
             self._saved_err = sys.stderr
-            sys.stderr = _ProgressStream(self._progress, self._saved_err, "stderr")
+            self._proxy_err = _ProgressStream(self._progress, self._saved_err, "stderr")
+            sys.stderr = self._proxy_err
 
     def uninstall(self):
         if self._cap_out and self._saved_out is not None:
+            # drain() emits a buffered newline-less tail that flush() holds.
             try:
-                sys.stdout.flush()
+                self._proxy_out.drain()
             except Exception:
                 pass
             sys.stdout = self._saved_out
             self._saved_out = None
+            self._proxy_out = None
         if self._cap_err and self._saved_err is not None:
             try:
-                sys.stderr.flush()
+                self._proxy_err.drain()
             except Exception:
                 pass
             sys.stderr = self._saved_err
             self._saved_err = None
+            self._proxy_err = None

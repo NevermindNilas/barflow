@@ -9,13 +9,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Test suite.** First `pytest` suite (89 tests) covering the pure-Python
-  surface — `style` SGR parsing, the `spinners` DSL, `bar_styles`/`columns`
-  factories, every `themes` preset resolving, seed-reproducible `random_theme`
-  — plus core behavior reachable from Python: counter/multi-task state via the
-  `completed`/`n_tasks` getters, and computed `percentage`/`fraction` (zero-total
-  sentinel, overshoot clamp) read through a `CallbackColumn` snapshot. Added a
-  `test` optional-dependency extra and pytest config to `pyproject.toml`.
+- **`pacman` theme reworked + `pacman` bar glyphs.** The `pacman` theme is now a
+  Pac-Man munching a row of pellets — eaten path blank behind, `•` pellets
+  ahead, and a `ᗧ`→`●` chomping mouth (open wedge snapping shut) animated at the
+  leading edge via the bar-tip pipeline. (Replaces the former emoji-ball
+  `pacman`.)
+
+- **`Progress.render_line(task_id=0) -> str`.** Renders a task's configured
+  columns into a string using the exact live-frame pipeline, but writes
+  nothing to the console and has no frame-state side effects. Useful for
+  logging a one-shot bar line — and it makes the C render pipeline directly
+  testable.
+- **`Progress` `__repr__`.** `repr(p)` now reports task-0 state, e.g.
+  `Progress(completed=12, total=100, desc='download', tasks=1)`, instead of the
+  opaque default object repr.
+- **`barflow._core._display_width(s) -> int`.** The renderer's own cell
+  accounting, exposed for measuring `render_line()` output and testing glyph
+  widths (skips ANSI CSI escapes; counts wide CJK/emoji as 2, combining marks
+  and variation selectors as 0).
+- **Test suite.** Grew the `pytest` suite to 144 tests. Beyond the pure-Python
+  surface (`style` SGR parsing, the `spinners` DSL, `bar_styles`/`columns`
+  factories, every `themes` preset, seed-reproducible `random_theme`) and the
+  `completed`/`n_tasks`/`CallbackColumn`-snapshot state checks, it now covers
+  the render pipeline via `render_line` (bar fill, percent alignment, count
+  clamp, every theme), `_display_width` across glyph classes, `capture_output`
+  install/uninstall round-trips, out-of-range `task_id` errors, the
+  Progress-as-iterator stop-at-total contract, and `atrack` theme/column/early-
+  break behaviour. Added a `test` optional-dependency extra and pytest config
+  to `pyproject.toml`.
+
+### Fixed
+
+- **Deadlock when a bare `Progress` with a `CallbackColumn` was dropped without
+  `close()`.** `Progress.__del__` joined the render thread while holding the
+  GIL, but the render thread's final frame re-enters Python (for the callback)
+  via the GIL → hard hang. Dealloc now releases the GIL across teardown, like
+  `close()`/`__exit__` already did. This also fixes the async early-`break`
+  path (`barflow.aio.atrack`), which relies on dealloc-time teardown.
+- **`capture_output=True` permanently hijacked `sys.stdout`.** Exhausting a
+  `track(..., capture_output=True)` tore the progress down via the C
+  `Tracker`'s `close()`, which bypassed the Python `__exit__` that uninstalls
+  the stdout/stderr proxy — so `sys.stdout` stayed replaced for the rest of the
+  process. `track()` now guards the capture path so `__exit__` always runs (on
+  exhaustion, early break, or exception), and `atrack` tears down via `__exit__`.
+- **A final newline-less `print(..., end="")` was lost under `capture_output`.**
+  `StdoutCapture.uninstall()` now drains the buffered partial line.
+- **`close()` after `pause()` repainted the bar over external output.** The
+  render thread's final frame ignored the `paused` flag, redrawing the bar on
+  top of whatever the external writer had emitted into the cleared area. The
+  final frame is now suppressed while paused.
+- **Wide glyphs (emoji / CJK) were measured as one cell.** `count_display_cells`
+  counted every code point as a single cell, so the shipped emoji themes and
+  CJK/fullwidth text mis-sized the multi-row cursor walk-back and the flex-bar
+  budget — leaving zombie rows or wrapping the line on narrow/stacked bars.
+  Cell counting is now width-aware (East-Asian Wide + emoji = 2, combining
+  marks / variation selectors = 0, with VS16 promoting its base), kept
+  conservative so 1-cell symbol glyphs (★ ♥ ✦ ◆ braille …) are unaffected.
+- **`atrack` ignored `theme=` and bare-string columns** that `track()` accepts
+  (it forwarded straight to the C core). It now mirrors `track()`'s fast/slow
+  dispatch, so themes, column factories, string shorthand, and `capture_output`
+  all work.
+- **A flex bar clipped under a pinned width with VT disabled emitted a stray
+  `\x1b[0m`** into otherwise escape-free output (e.g. a redirected log). The
+  hard-clip reset is now gated on VT being enabled.
+- **`track(task_id=N)` / `atrack(task_id=N)` for `N != 0`** raised an opaque
+  `IndexError`. Both build a single-task bar, so a non-zero `task_id` now raises
+  a clear `ValueError` pointing at `Progress` + `add_task()`.
+- **`spinners` factory annotations** referenced undefined `List`/`Sequence`
+  names, so `typing.get_type_hints()` raised `NameError`. Switched to runtime-
+  resolvable `list[str]` and `collections.abc.Sequence`.
+- **Overshoot count display.** The count column now shows `N/N` instead of
+  `12/3` when the counter is advanced past the total, matching the already-
+  clamped bar/percent (the raw `completed` counter is still reported unclamped).
+
+### Changed
+
+- **Multi-bar `update()` is ~2.5× faster.** `update(task_id, n)` resolves the
+  task pointer under `render_mtx`. It now drops the GIL before the lock *only
+  when a `CallbackColumn` is present* — that is the sole case where the render
+  thread re-enters Python under `render_mtx` (via `PyGILState_Ensure`) and a
+  GIL-holding waiter could deadlock. With no callback column it takes the lock
+  with the GIL held, skipping the per-call `Py_BEGIN/END_ALLOW_THREADS`
+  thread-state save/restore. `has_callback_col` is fixed during single-threaded
+  init (before the render thread starts) and columns are immutable after, so the
+  read needs no synchronization. Measured **67.4 → 26.4 ms per 1 M `update()`s
+  (14.8 → 37.7 M it/s)** on Windows / CPython 3.14, same-harness before/after
+  (`bench_multibar.py`); the win is larger on 3.14 because its GIL save/restore
+  is costlier. The cold setters (`set_total` / `set_description` /
+  `set_task_description` / `add_task`) keep the unconditional GIL drop — they are
+  not hot. Guarded by the new `tests/test_update_concurrency.py`, which hammers
+  `update()` + `add_task()` under a 1 ms render interval (watchdog-killed on
+  hang) for both the callback and no-callback paths and checks counter exactness.
+- **Themed / columned `Progress` construction is ~25% cheaper.**
+  `_progress.Progress.__init__`, `columns.BarColumn`, and `columns.SpinnerColumn`
+  now cache their lazy `from . import …` submodule lookups on first use instead
+  of re-running the import machinery (`_handle_fromlist` / `parent`) on every
+  call, and the `style.style()` SGR parser is memoized (`functools.lru_cache`,
+  bounded). Memoization wraps only the str-parsing core, so the exception
+  behaviour for empty / raw-escape / non-str / invalid specs is byte-for-byte
+  unchanged. Themed construction **6453 → 4768 ns**, columned (fresh factories)
+  **4783 → 3520 ns** (new `benchmarks/bench_construct.py`). Cold `import barflow`
+  is unaffected — the submodules are still loaded lazily on first use, never at
+  import, and `style` / `functools` stay off the `from barflow import track`
+  fast path.
+- Render loop is allocation-free per frame again: the per-task `visible_cols`
+  and `this_cells` scratch vectors are hoisted into `ProgressState` (reused
+  like the other frame buffers), and the delta-cache prime now swaps rather
+  than copies each column's rendered bytes.
+- Docs: corrected the `disable=True` note in `llms.txt` (it suppresses
+  rendering/I-O but does **not** short-circuit the per-iteration atomic), and
+  the README feature list (10 column types including the callback column).
 
 ## [0.3.1] — 2026-05-24
 

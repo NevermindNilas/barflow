@@ -29,6 +29,8 @@ on a specific terminal).
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 
 # Foreground 30–37 / 90–97
 _NAMED_FG: dict[str, int] = {
@@ -85,7 +87,21 @@ def style(spec: str | None) -> str:
     # Raw escape passthrough.
     if spec.startswith("\x1b"):
         return spec
+    return _style_parse(spec)
 
+
+@lru_cache(maxsize=256)
+def _style_parse(spec: str) -> str:
+    """Parse a non-empty, non-raw-escape style spec into an SGR escape.
+
+    Cached because style strings (especially the fixed set inside a theme)
+    recur on every Progress construction, and the parse is a pure str->str.
+    Bad tokens raise ValueError as before — lru_cache does not cache
+    exceptions, so an invalid spec re-raises identically on every call.
+    Only reached from `style()` after the None/empty/raw-escape guards, so
+    `spec` is guaranteed to be a hashable str (non-str specs still hit
+    `.startswith` in `style()` and raise AttributeError exactly as before).
+    """
     parts = spec.split()
     codes: list[str] = []
     i = 0

@@ -6,17 +6,30 @@ from __future__ import annotations
 
 from . import _core
 
+# Lazily-bound submodules, cached on first use. Kept out of the top-level
+# import list so importing `_progress` (and thus `barflow.Progress`) does not
+# eagerly pull in themes/columns; cached so repeated construction does not
+# re-run the `from . import X` machinery on every __init__.
+_themes_mod = None
+_columns_mod = None
+
 
 class Progress(_core.Progress):
     def __init__(self, *columns, total=None, desc=None, disable=False,
                  min_interval=0.05, theme=None, capture_output=False):
         resolved = None
         if theme is not None and not columns:
-            from . import themes as _themes
-            columns = tuple(_themes.get(theme))
+            global _themes_mod
+            if _themes_mod is None:
+                from . import themes as _t
+                _themes_mod = _t
+            columns = tuple(_themes_mod.get(theme))
         if columns:
-            from . import columns as _columns
-            resolved = _columns.resolve_columns(list(columns))
+            global _columns_mod
+            if _columns_mod is None:
+                from . import columns as _c
+                _columns_mod = _c
+            resolved = _columns_mod.resolve_columns(list(columns))
 
         super().__init__(
             total=total,

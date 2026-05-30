@@ -208,11 +208,12 @@ the second targets anyone touching the C core.
   adds a Python-level write interceptor on every user print — fine
   for interactive scripts, unnecessary overhead for batch jobs
   where you aren't printing from inside the loop.
-- **Short-circuit with `disable=True` in tests or non-TTY runs.**
-  The first thing the C core does on `tick`/`advance` is check
-  `st->disable` (see `_core.cpp:345`) and return immediately. Cost
-  drops to a single comparison — no atomic, no cv, no render
-  thread work.
+- **Use `disable=True` in tests or non-TTY runs.** It suppresses all
+  rendering and I/O: `__enter__` returns early without starting the
+  render thread, and `write_bytes` becomes a no-op. The per-iteration
+  counter still updates, though — `tick`/`advance`/`Tracker` always run
+  the relaxed atomic `fetch_add`; there is no `disable` short-circuit in
+  the hot path, so it does not drop to a single comparison.
 - **Avoid `CallbackColumn` in tight loops unless you need it.** It's
   the only built-in column type that re-enters Python on the render
   thread. The render thread acquires the GIL once per frame to run

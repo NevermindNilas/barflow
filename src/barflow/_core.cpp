@@ -139,6 +139,14 @@ struct Column {
     std::string left_border;   // "|" by default
     std::string right_border;  // "|" by default
 
+    // Animated leading-edge frames for COL_BAR. When non-empty and the bar
+    // is incomplete, the boundary cell (the cell just past the filled run)
+    // cycles through these by frame_tick instead of showing a static
+    // partial glyph — the alive-progress-style "moving tip" that keeps the
+    // bar in motion even while the fill fraction is stalled. Empty vector =
+    // no tip (the static partial/round/empty edge, unchanged behavior).
+    std::vector<std::string> tip;
+
     // Precomputed row strings used by render_column(COL_BAR): `fill`
     // repeated `width` times and `empty_ch` repeated `width` times.
     // Populated by finalize_bar_cache() once width/glyphs are known,
@@ -274,6 +282,11 @@ struct ProgressState {
     // columns.size() lazily in render_frame. Used by both the flex path
     // and the delta-render (diff) path.
     std::vector<std::string> col_out_cache;
+    // Per-task scratch reused across tasks/frames (resize never shrinks
+    // capacity), matching the col_out_cache discipline — keeps the render
+    // loop allocation-free after the first frame. Refilled per task.
+    std::vector<char> visible_cols_cache;
+    std::vector<int>  this_cells_cache;
 
     // --- Delta-render (diff-based frame output) cache ---
     // Previous-frame per-(task, column) rendered bytes and their visible
@@ -498,13 +511,86 @@ struct RenderCtx {
     int       bar_width_override;
 };
 
+// Decode one UTF-8 sequence starting at data[i] (n = total length). Sets
+// *adv to the bytes consumed and returns the code point. Malformed or
+// truncated sequences decode as a single byte (adv=1) so callers can
+// never loop forever.
+static inline uint32_t utf8_decode(const char* data, size_t n, size_t i,
+                                   size_t* adv) {
+    unsigned char c = static_cast<unsigned char>(data[i]);
+    if ((c & 0x80) == 0) { *adv = 1; return c; }
+    if ((c & 0xE0) == 0xC0 && i + 1 < n) {
+        *adv = 2;
+        return ((c & 0x1Fu) << 6) |
+               (static_cast<unsigned char>(data[i + 1]) & 0x3Fu);
+    }
+    if ((c & 0xF0) == 0xE0 && i + 2 < n) {
+        *adv = 3;
+        return ((c & 0x0Fu) << 12) |
+               ((static_cast<unsigned char>(data[i + 1]) & 0x3Fu) << 6) |
+               (static_cast<unsigned char>(data[i + 2]) & 0x3Fu);
+    }
+    if ((c & 0xF8) == 0xF0 && i + 3 < n) {
+        *adv = 4;
+        return ((c & 0x07u) << 18) |
+               ((static_cast<unsigned char>(data[i + 1]) & 0x3Fu) << 12) |
+               ((static_cast<unsigned char>(data[i + 2]) & 0x3Fu) << 6) |
+               (static_cast<unsigned char>(data[i + 3]) & 0x3Fu);
+    }
+    *adv = 1;
+    return c;
+}
+
+// Terminal display width of a code point: 0 for combining marks /
+// joiners / variation selectors, 2 for East-Asian Wide + Fullwidth +
+// emoji, 1 otherwise. An approximation (true emoji width is terminal-
+// and font-dependent) but deliberately conservative: only ranges that
+// are unambiguously double-width or default-emoji presentation widen,
+// so the 1-cell symbol glyphs the bar styles rely on (★ ♥ ✦ ◆ ▶ braille
+// …) keep width 1. Variation-selector-16 (U+FE0F) after a base is
+// applied by the caller — that is how the shipped emoji themes
+// (⚡️ ☀️ ❤️ …) earn their second cell.
+static inline int codepoint_width(uint32_t cp) {
+    if (cp < 0x80) return 1;                       // ASCII fast path
+    // Zero-width.
+    if (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0xFEFF) return 0;
+    if (cp >= 0x0300 && cp <= 0x036F) return 0;    // combining diacriticals
+    if (cp >= 0x1AB0 && cp <= 0x1AFF) return 0;
+    if (cp >= 0x1DC0 && cp <= 0x1DFF) return 0;
+    if (cp >= 0x20D0 && cp <= 0x20FF) return 0;    // combining marks for symbols
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return 0;    // variation selectors
+    if (cp >= 0xFE20 && cp <= 0xFE2F) return 0;    // combining half marks
+    // Wide: CJK / fullwidth.
+    if (cp >= 0x1100 && cp <= 0x115F) return 2;    // Hangul Jamo
+    if (cp == 0x2329 || cp == 0x232A) return 2;
+    if (cp >= 0x2E80 && cp <= 0x303E) return 2;    // CJK radicals .. Kangxi
+    if (cp >= 0x3041 && cp <= 0x33FF) return 2;    // Hiragana .. CJK compat
+    if (cp >= 0x3400 && cp <= 0x4DBF) return 2;    // CJK ext A
+    if (cp >= 0x4E00 && cp <= 0x9FFF) return 2;    // CJK unified
+    if (cp >= 0xA000 && cp <= 0xA4CF) return 2;    // Yi
+    if (cp >= 0xAC00 && cp <= 0xD7A3) return 2;    // Hangul syllables
+    if (cp >= 0xF900 && cp <= 0xFAFF) return 2;    // CJK compat ideographs
+    if (cp >= 0xFE30 && cp <= 0xFE4F) return 2;    // CJK compat forms
+    if (cp >= 0xFF00 && cp <= 0xFF60) return 2;    // fullwidth forms
+    if (cp >= 0xFFE0 && cp <= 0xFFE6) return 2;    // fullwidth signs
+    // Emoji (default 2-cell presentation).
+    if (cp >= 0x1F000 && cp <= 0x1FAFF) return 2;
+    if (cp >= 0x20000 && cp <= 0x3FFFD) return 2;  // CJK ext B+
+    // Default-emoji symbols outside the main planes that ship in themes;
+    // listed explicitly so their 1-cell symbol neighbours stay 1 cell.
+    if (cp == 0x2B1B || cp == 0x2B1C) return 2;    // ⬛ ⬜
+    if (cp == 0x26AA || cp == 0x26AB) return 2;    // ⚪ ⚫
+    if (cp == 0x26C5 || cp == 0x26C8) return 2;    // ⛅ ⛈
+    return 1;
+}
+
 // Truncate a rendered byte string to at most `max_cells` display cells
-// and append an ANSI reset so any dangling style from the cut-off tail
-// cannot bleed into whatever is rendered after it. ANSI CSI sequences
-// pass through atomically (never split mid-escape). Used by the flex
-// path when even the leftmost visible column is wider than the
-// terminal — rather than wrap, we hard-clip.
-static void truncate_to_cells(std::string& s, int max_cells) {
+// and (only when VT is on) append an ANSI reset so any dangling style
+// from the cut-off tail cannot bleed into whatever is rendered after it.
+// ANSI CSI sequences pass through atomically (never split mid-escape).
+// Used by the flex path when even the leftmost visible column is wider
+// than the terminal — rather than wrap, we hard-clip.
+static void truncate_to_cells(std::string& s, int max_cells, bool vt) {
     if (max_cells < 0) max_cells = 0;
     int cells = 0;
     size_t i = 0;
@@ -525,26 +611,28 @@ static void truncate_to_cells(std::string& s, int max_cells) {
         if (c == '\r' || c == '\n' || c == '\t') {
             ++i; last_safe = i; continue;
         }
-        int step;
-        if      ((c & 0x80) == 0)    step = 1;
-        else if ((c & 0xE0) == 0xC0) step = 2;
-        else if ((c & 0xF0) == 0xE0) step = 3;
-        else if ((c & 0xF8) == 0xF0) step = 4;
-        else                          step = 1;
-        if (cells >= max_cells) break;
-        ++cells;
-        i += step;
+        size_t adv = 1;
+        uint32_t cp = utf8_decode(s.data(), n, i, &adv);
+        int w = codepoint_width(cp);
+        if (i + adv < n) {
+            size_t adv2 = 1;
+            uint32_t nxt = utf8_decode(s.data(), n, i + adv, &adv2);
+            if (nxt == 0xFE0F) { if (w == 1) w = 2; }
+            else if (nxt == 0xFE0E) { w = 1; }
+        }
+        if (cells + w > max_cells) break;
+        cells += w;
+        i += adv;
         last_safe = i;
     }
     s.resize(last_safe);
-    s.append("\x1b[0m", 4);
+    if (vt) s.append("\x1b[0m", 4);
 }
 
 // Count visible cells in a rendered byte string. Skips ANSI CSI escape
-// sequences (\x1b[...<final>) and counts UTF-8 code points as single
-// cells. Accurate for ASCII + box-drawing/block glyphs barflow renders;
-// slightly off for wide CJK/emoji (each would count as 1 cell instead
-// of 2), but good enough to size the flex bar and still leave margin.
+// sequences (\x1b[...<final>) and sums per-code-point display widths via
+// codepoint_width, so wide CJK/emoji count as 2 cells. A trailing
+// variation-selector-16 promotes its base to 2 cells; VS15 forces 1.
 static int count_display_cells(const char* data, size_t n) {
     int cells = 0;
     size_t i = 0;
@@ -559,11 +647,17 @@ static int count_display_cells(const char* data, size_t n) {
             continue;
         }
         if (c == '\r' || c == '\n' || c == '\t') { ++i; continue; }
-        if ((c & 0x80) == 0)      { i += 1; ++cells; }
-        else if ((c & 0xE0) == 0xC0) { i += 2; ++cells; }
-        else if ((c & 0xF0) == 0xE0) { i += 3; ++cells; }
-        else if ((c & 0xF8) == 0xF0) { i += 4; ++cells; }
-        else                         { i += 1; }
+        size_t adv = 1;
+        uint32_t cp = utf8_decode(data, n, i, &adv);
+        int w = codepoint_width(cp);
+        if (i + adv < n) {
+            size_t adv2 = 1;
+            uint32_t nxt = utf8_decode(data, n, i + adv, &adv2);
+            if (nxt == 0xFE0F) { if (w == 1) w = 2; }
+            else if (nxt == 0xFE0E) { w = 1; }
+        }
+        cells += w;
+        i += adv;
     }
     return cells;
 }
@@ -648,7 +742,14 @@ void render_column(const Column& col, const Task& t,
                 for (int i = 0; i < full && i < bar_w; ++i) buf.append(col.fill);
             }
             if (full < bar_w) {
-                if (partial > 0 && !col.partials.empty()) {
+                if (!col.tip.empty() && ctx.frac < 1.0) {
+                    // Animated leading edge: cycle the tip frames by
+                    // frame_tick so the boundary cell moves every frame even
+                    // when the fill fraction is static. `frac < 1.0` guards
+                    // the complete bar (full == bar_w skips this block, so a
+                    // finished bar is a solid run with no dangling tip).
+                    buf.append(col.tip[ctx.frame_tick % col.tip.size()]);
+                } else if (partial > 0 && !col.partials.empty()) {
                     // Map 1..7 (partial level) onto 0..N-1 (partials index).
                     size_t idx = static_cast<size_t>(partial - 1)
                                  * col.partials.size() / 7;
@@ -673,8 +774,12 @@ void render_column(const Column& col, const Task& t,
             }
         } else {
             // Unknown total: a single filled cell bounces across the width.
-            int pos = static_cast<int>(ctx.frame_tick % (bar_w * 2));
-            if (pos >= bar_w) pos = (bar_w * 2) - 1 - pos;
+            // Triangle wave with period 2*bar_w-2 so each wall is visited once
+            // per sweep (period 2*bar_w would hold both endpoints for two
+            // consecutive frames). bar_w==1 collapses to a fixed cell.
+            int period = bar_w > 1 ? (bar_w * 2 - 2) : 1;
+            int pos = static_cast<int>(ctx.frame_tick % period);
+            if (pos >= bar_w) pos = period - pos;
             if (have_cache) {
                 // Left run of empties, single fill cell, right run of empties.
                 buf.append(col.empty_full.data(),
@@ -721,13 +826,20 @@ void render_column(const Column& col, const Task& t,
         break;
     }
 
-    case COL_COUNT:
-        format_number(buf, t.last_snapshot);
+    case COL_COUNT: {
+        // Clamp the *displayed* count to total so an overshoot (advance()
+        // past total) shows "N/N" rather than "12/3" — consistent with the
+        // bar/percent, which already clamp ctx.frac. The raw atomic and the
+        // `completed` getter are deliberately left unclamped.
+        uint64_t shown = (t.total > 0 && t.last_snapshot > t.total)
+                             ? t.total : t.last_snapshot;
+        format_number(buf, shown);
         if (t.total > 0) {
             buf.push_back('/');
             format_number(buf, t.total);
         }
         break;
+    }
 
     case COL_RATE:
         format_rate(buf, ctx.rate);
@@ -1083,8 +1195,11 @@ void render_frame(ProgressState* st) {
         // flex path may zero entries; the non-flex path leaves them all
         // 1. We track it so the diff comparison against prev_visible_mask
         // can detect flex-collapse transitions and invalidate the cache
-        // for the affected line.
-        std::vector<char> visible_cols(ncols, 1);
+        // for the affected line. Reuses a ProgressState-hoisted buffer
+        // (refilled to all-1 each task) to avoid a per-task heap alloc.
+        std::vector<char>& visible_cols = st->visible_cols_cache;
+        if (visible_cols.size() != ncols) visible_cols.resize(ncols);
+        std::fill(visible_cols.begin(), visible_cols.end(), static_cast<char>(1));
 
         // Per-column display-cell counts for THIS frame, populated inline
         // as each column is rendered. The flex path measures non-bar
@@ -1092,8 +1207,11 @@ void render_frame(ProgressState* st) {
         // then patches in the flex bar's width post-render. The non-flex
         // path measures lazily after each render_column. Either way the
         // delta-emit path downstream reads `this_cells` directly without
-        // re-walking col_out.
-        std::vector<int> this_cells(ncols, 0);
+        // re-walking col_out. Reuses a ProgressState-hoisted buffer
+        // (refilled to all-0 each task) to avoid a per-task heap alloc.
+        std::vector<int>& this_cells = st->this_cells_cache;
+        if (this_cells.size() != ncols) this_cells.resize(ncols);
+        std::fill(this_cells.begin(), this_cells.end(), 0);
 
         if (flex_bar_idx < 0) {
             // Non-flex: render every column into its col_out[] slot and
@@ -1184,7 +1302,7 @@ void render_frame(ProgressState* st) {
                         }
                         int budget = available - others;
                         if (budget < 0) budget = 0;
-                        truncate_to_cells(col_out[anchor], budget);
+                        truncate_to_cells(col_out[anchor], budget, ctx.vt_enabled);
                         // truncate_to_cells mutated col_out[anchor]; refresh
                         // its cell count so downstream delta-diff reads the
                         // post-clip width.
@@ -1252,7 +1370,11 @@ void render_frame(ProgressState* st) {
             for (size_t ci = 0; ci < ncols; ++ci) {
                 if (!visible_cols[ci]) continue;
                 const Column& col = st->columns[ci];
-                bool always_dirty = (col.type == COL_SPINNER);
+                // Spinners animate every frame; a bar with an animated tip
+                // does too (its boundary cell cycles by frame_tick even when
+                // the fill is unchanged), so neither can be CUF-skipped.
+                bool always_dirty = (col.type == COL_SPINNER) ||
+                                    (col.type == COL_BAR && !col.tip.empty());
                 bool bytes_match  = (!always_dirty) &&
                                     positions_stable &&
                                     col_out[ci] == prev_out[ci];
@@ -1340,7 +1462,13 @@ void render_frame(ProgressState* st) {
         // path we still update the cache so the next frame can diff
         // against a valid baseline.
         for (size_t ci = 0; ci < ncols; ++ci) {
-            prev_out[ci]   = col_out[ci];
+            // swap, not copy: col_out[ci] is dead after this loop until the
+            // next frame's unconditional clear (both emit paths re-clear it
+            // before rendering), and col_out is render_frame-local scratch
+            // observed nowhere else — so moving the bytes into the baseline
+            // (and the stale baseline bytes into col_out) avoids a full
+            // memcpy of every column's rendered bytes every frame.
+            std::swap(prev_out[ci], col_out[ci]);
             prev_cells[ci] = this_cells[ci];
             prev_vis[ci]   = static_cast<uint8_t>(visible_cols[ci]);
         }
@@ -1415,9 +1543,14 @@ void render_loop(ProgressState* st) {
             st->force_render = false;
         }
     }
-    // Final frame, still under the lock.
-    render_frame(st);
-    if (st->vt_enabled || st->is_console) write_bytes(st, "\n", 1);
+    // Final frame, still under the lock. If paused, pause() already erased
+    // the bar area and handed the screen to an external writer — emitting a
+    // frame here would repaint the bar on top of that output, violating the
+    // pause() contract. So skip it (and its trailing newline) while paused.
+    if (!st->paused.load(std::memory_order_acquire)) {
+        render_frame(st);
+        if (st->vt_enabled || st->is_console) write_bytes(st, "\n", 1);
+    }
 }
 
 // -------- Python binding: Progress type --------
@@ -1440,15 +1573,17 @@ int parse_columns(PyObject* columns_obj, std::vector<Column>& out) {
         PyObject* item = PySequence_Fast_GET_ITEM(columns_obj, i);
         // Accept: 5-tuple (type, text, width, frames, color)
         //     or  6-tuple (type, text, width, frames, color, bar_glyphs)
+        //     or  7-tuple (..., bar_glyphs, tip) — COL_BAR only; `tip` is
+        //         None | list/tuple of str (animated leading-edge frames)
         //     where bar_glyphs = None | (fill, empty, partials, left, right)
         if (!PyTuple_Check(item)) {
             PyErr_SetString(PyExc_TypeError, "each column must be a tuple");
             return -1;
         }
         Py_ssize_t tlen = PyTuple_GET_SIZE(item);
-        if (tlen != 5 && tlen != 6) {
+        if (tlen != 5 && tlen != 6 && tlen != 7) {
             PyErr_SetString(PyExc_TypeError,
-                "each column must be a 5- or 6-tuple");
+                "each column must be a 5-, 6-, or 7-tuple");
             return -1;
         }
         Column c;
@@ -1516,7 +1651,7 @@ int parse_columns(PyObject* columns_obj, std::vector<Column>& out) {
             }
             Py_INCREF(cb);
             c.py_callable.assign_new_ref(cb);
-        } else if (tlen == 6) {
+        } else if (tlen == 6 || tlen == 7) {
             PyObject* g = PyTuple_GET_ITEM(item, 5);
             if (g != Py_None) {
                 if (!PyTuple_Check(g) || PyTuple_GET_SIZE(g) != 5) {
@@ -1553,6 +1688,31 @@ int parse_columns(PyObject* columns_obj, std::vector<Column>& out) {
                 if (pull_str(PyTuple_GET_ITEM(g, 3), c.left_border) < 0) return -1;
                 if (pull_str(PyTuple_GET_ITEM(g, 4), c.right_border) < 0) return -1;
                 glyphs_from_user = true;
+            }
+        }
+
+        // 7-tuple slot 6: animated bar-tip frames. COL_BAR only; None or a
+        // list/tuple of single-cell strings cycled at the bar's leading edge.
+        if (tlen == 7) {
+            if (c.type != COL_BAR) {
+                PyErr_SetString(PyExc_TypeError,
+                    "only COL_BAR columns may carry a 7th (tip) element");
+                return -1;
+            }
+            PyObject* tp = PyTuple_GET_ITEM(item, 6);
+            if (tp != Py_None) {
+                if (!PyList_Check(tp) && !PyTuple_Check(tp)) {
+                    PyErr_SetString(PyExc_TypeError,
+                        "bar tip must be None or a list/tuple of str");
+                    return -1;
+                }
+                Py_ssize_t tn = PySequence_Fast_GET_SIZE(tp);
+                c.tip.reserve(static_cast<size_t>(tn));
+                for (Py_ssize_t j = 0; j < tn; ++j) {
+                    const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(tp, j));
+                    if (!s) return -1;
+                    c.tip.emplace_back(s);
+                }
             }
         }
 
@@ -1644,7 +1804,17 @@ void close_state(ProgressState* st) {
 
 void Progress_dealloc(PyProgress* self) {
     if (self->state) {
+        // Drop the GIL across close_state() — it join()s the render thread,
+        // whose final render_frame re-enters Python via PyGILState_Ensure for
+        // any CallbackColumn. Holding the GIL here (tp_dealloc runs with it
+        // held) while join() blocks would deadlock against that Ensure. This
+        // mirrors Progress_close_impl; close_state is std::call_once-guarded,
+        // so it's a cheap no-op if close()/__exit__ already ran. `delete`
+        // must stay AFTER the join — the render thread touches *state until
+        // it exits.
+        Py_BEGIN_ALLOW_THREADS
         close_state(self->state);
+        Py_END_ALLOW_THREADS
         delete self->state;
         self->state = nullptr;
     }
@@ -1795,14 +1965,13 @@ PyObject* Progress_update(PyProgress* self,
     if (nargs >= 2) {
         if (barflow_pylong_to_u64(args[1], &n) < 0) return nullptr;
     }
-    // Drop the GIL around render_mtx: render_frame holds the lock while a
-    // CallbackColumn re-enters Python, so a GIL-holding caller blocked here
-    // would deadlock. Defer the out-of-range error until the GIL is back.
+    // Resolve the task pointer under render_mtx (the render thread can
+    // reallocate `tasks` via add_task). Defer the out-of-range error until
+    // the GIL is back.
     Task* target = nullptr;
     bool  oob    = false;
     auto* st     = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
+    auto resolve = [&]() {
         std::lock_guard<std::mutex> lg(st->render_mtx);
         if (task_id < 0 ||
             static_cast<size_t>(task_id) >= st->tasks.size()) {
@@ -1810,8 +1979,24 @@ PyObject* Progress_update(PyProgress* self,
         } else {
             target = st->tasks[static_cast<size_t>(task_id)].get();
         }
+    };
+    // The GIL must be dropped before render_mtx ONLY when a CallbackColumn
+    // exists: render_frame holds render_mtx while re-entering Python via
+    // PyGILState_Ensure, so a GIL-holding waiter would deadlock against it.
+    // With no callback column the render thread (and every other render_mtx
+    // holder) never touches the GIL under the lock, so taking it with the
+    // GIL held cannot deadlock — and we skip the per-call thread-state
+    // save/restore on the multibar hot path. has_callback_col is set once in
+    // refresh_column_flags during single-threaded init (before the render
+    // thread starts) and columns are immutable afterward, so this read needs
+    // no synchronization.
+    if (st->has_callback_col) {
+        Py_BEGIN_ALLOW_THREADS
+        resolve();
+        Py_END_ALLOW_THREADS
+    } else {
+        resolve();
     }
-    Py_END_ALLOW_THREADS
     if (oob) {
         PyErr_SetString(PyExc_IndexError, "task_id out of range");
         return nullptr;
@@ -2152,6 +2337,125 @@ PyObject* Progress_get_n_tasks(PyProgress* self, void* /*closure*/) {
     return PyLong_FromSsize_t(n);
 }
 
+// repr: a one-line snapshot of task 0 + task count. Snapshots fields under
+// render_mtx (GIL dropped first, per the lock-before-GIL discipline) so it
+// doesn't race the render thread's description writes, then builds the
+// string with the GIL reacquired. Never on the hot path.
+PyObject* Progress_repr(PyProgress* self) {
+    auto* st = self->state;
+    uint64_t completed = 0, total = 0;
+    std::string desc;
+    size_t ntasks = 0;
+    bool have_task = false;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        ntasks = st->tasks.size();
+        if (!st->tasks.empty()) {
+            Task* t0 = st->tasks[0].get();
+            completed = t0->completed.load(std::memory_order_relaxed);
+            total = t0->total;
+            desc = t0->description;
+            have_task = true;
+        }
+    }
+    Py_END_ALLOW_THREADS
+
+    std::string out = "Progress(";
+    if (have_task) {
+        out += "completed=";
+        format_number(out, completed);
+        out += ", total=";
+        if (total > 0) format_number(out, total);
+        else           out += "None";
+        if (!desc.empty()) {
+            // Escape so a desc containing quotes/backslashes/control chars
+            // can't produce an ambiguous repr (e.g. desc='a'b').
+            out += ", desc='";
+            for (char ch : desc) {
+                switch (ch) {
+                    case '\\': out += "\\\\"; break;
+                    case '\'': out += "\\'";  break;
+                    case '\n': out += "\\n";  break;
+                    case '\r': out += "\\r";  break;
+                    case '\t': out += "\\t";  break;
+                    default:   out += ch;     break;
+                }
+            }
+            out += '\'';
+        }
+        out += ", tasks=";
+        format_number(out, static_cast<uint64_t>(ntasks));
+    } else {
+        out += "tasks=0";
+    }
+    out += ')';
+    return PyUnicode_FromStringAndSize(out.data(),
+                                       static_cast<Py_ssize_t>(out.size()));
+}
+
+// render_line(task_id=0) -> str — render the configured columns for one
+// task into a string, exactly as a live frame would (same column pipeline,
+// same style/cell logic), but WITHOUT touching the console, the render
+// thread, or the delta/frame state. Intended for logging a one-shot bar
+// line and for testing the render pipeline (the only column bytes a test
+// can otherwise observe are none — the C core writes straight to the
+// console fd). Does not advance frame_tick, so spinner/indeterminate
+// output is deterministic across calls.
+PyObject* Progress_render_line(PyProgress* self,
+                               PyObject* const* args,
+                               Py_ssize_t nargs) {
+    long task_id = 0;
+    if (nargs >= 1) {
+        task_id = PyLong_AsLong(args[0]);
+        if (PyErr_Occurred()) return nullptr;
+    }
+    auto* st = self->state;
+    std::string out;
+    bool oob = false;
+    // GIL is held on entry. Drop it before render_mtx (lock-before-GIL, vs.
+    // the render thread), then re-Ensure inside the lock to run the column
+    // pipeline (CallbackColumns re-enter Python; nothing else needs the GIL).
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (task_id < 0 || static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            PyGILState_STATE g = PyGILState_Ensure();
+            Task* task = st->tasks[static_cast<size_t>(task_id)].get();
+            uint64_t completed = task->completed.load(std::memory_order_acquire);
+            task->last_snapshot = completed;
+            RenderCtx ctx;
+            ctx.vt_enabled = st->vt_enabled;
+            uint64_t tns = now_ns();
+            ctx.elapsed = static_cast<double>(tns - task->start_time_ns) / 1e9;
+            ctx.rate = ctx.elapsed > 0
+                ? static_cast<double>(completed) / ctx.elapsed : 0.0;
+            ctx.frac = task->total > 0
+                ? std::min(1.0, static_cast<double>(completed) /
+                                static_cast<double>(task->total))
+                : -1.0;
+            ctx.frame_tick = st->frame_tick;
+            ctx.bar_width_override = -1;
+            ctx.snapshot = st->has_callback_col
+                ? build_task_snapshot(*task, ctx) : nullptr;
+            for (size_t ci = 0; ci < st->columns.size(); ++ci) {
+                render_column(st->columns[ci], *task, out, ctx);
+            }
+            if (ctx.snapshot) Py_DECREF(ctx.snapshot);
+            PyGILState_Release(g);
+        }
+    }
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return nullptr;
+    }
+    return PyUnicode_FromStringAndSize(out.data(),
+                                       static_cast<Py_ssize_t>(out.size()));
+}
+
 PyMethodDef Progress_methods[] = {
     {"__enter__",  reinterpret_cast<PyCFunction>(Progress_enter),   METH_NOARGS,  nullptr},
     {"__exit__",   reinterpret_cast<PyCFunction>(Progress_exit),    METH_VARARGS, nullptr},
@@ -2176,6 +2480,9 @@ PyMethodDef Progress_methods[] = {
         "set_task_description(task_id, desc) — update a task's description."},
     {"refresh",    reinterpret_cast<PyCFunction>(Progress_refresh),    METH_NOARGS,
         "Force an immediate render frame."},
+    {"render_line", reinterpret_cast<PyCFunction>(Progress_render_line), METH_FASTCALL,
+        "render_line(task_id=0) -> str — render a task's columns to a string "
+        "(no console output, no frame-state side effects)."},
     {"write_above",reinterpret_cast<PyCFunction>(Progress_write_above),
         METH_O, "Emit text above the bar area without tearing."},
     {"pause",      reinterpret_cast<PyCFunction>(Progress_pause),   METH_NOARGS,
@@ -2315,12 +2622,36 @@ PyTypeObject TrackerType = { PyVarObject_HEAD_INIT(nullptr, 0) };
 
 // -------- Module init --------
 
+// _display_width(s) -> int — terminal display width of a string, using the
+// same accounting as the renderer (skips ANSI CSI escapes, sums per-glyph
+// widths, folds in variation selectors). Exposed so the width logic the
+// multi-row walk-back and flex sizing depend on is directly testable, and
+// so callers can measure render_line() output.
+PyObject* mod_display_width(PyObject* /*self*/, PyObject* arg) {
+    if (!PyUnicode_Check(arg)) {
+        PyErr_SetString(PyExc_TypeError, "_display_width expects str");
+        return nullptr;
+    }
+    Py_ssize_t len = 0;
+    const char* s = PyUnicode_AsUTF8AndSize(arg, &len);
+    if (!s) return nullptr;
+    int w = count_display_cells(s, static_cast<size_t>(len));
+    return PyLong_FromLong(w);
+}
+
+PyMethodDef module_methods[] = {
+    {"_display_width", mod_display_width, METH_O,
+     "_display_width(s) -> int — terminal display width of a string, "
+     "skipping ANSI CSI escapes and counting wide/zero-width glyphs."},
+    {nullptr, nullptr, 0, nullptr}
+};
+
 PyModuleDef moduledef = {
     PyModuleDef_HEAD_INIT,
     "barflow._core",
     "C++ core for BarFlow.",
     -1,
-    nullptr, nullptr, nullptr, nullptr, nullptr
+    module_methods, nullptr, nullptr, nullptr, nullptr
 };
 
 }  // anon namespace
@@ -2333,6 +2664,7 @@ extern "C" PyMODINIT_FUNC PyInit__core(void) {
     ProgressType.tp_doc       = "Progress bar with multi-task + columns.";
     ProgressType.tp_methods   = Progress_methods;
     ProgressType.tp_getset    = Progress_getset;
+    ProgressType.tp_repr      = reinterpret_cast<reprfunc>(Progress_repr);
     ProgressType.tp_init      = reinterpret_cast<initproc>(Progress_init);
     ProgressType.tp_new       = PyType_GenericNew;
     ProgressType.tp_iter      = reinterpret_cast<getiterfunc>(Progress_iter);

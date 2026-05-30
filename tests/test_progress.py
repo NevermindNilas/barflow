@@ -7,8 +7,10 @@ snapshot — see conftest.capture_snapshots.
 
 from __future__ import annotations
 
+import pytest
+
 import barflow
-from conftest import capture_snapshots
+from conftest import capture_snapshots, capture_task_snapshot
 
 
 # ---- counter mutation ------------------------------------------------------
@@ -141,3 +143,87 @@ def test_double_close_is_safe():
     p.__enter__()
     p.close()
     p.close()  # must not raise
+
+
+# ---- out-of-range task ids (deferred-raise paths) --------------------------
+
+def test_update_out_of_range_raises():
+    with barflow.Progress(disable=True) as p:
+        p.add_task(total=10)
+        with pytest.raises(IndexError):
+            p.update(99, 1)     # task_id >= n_tasks
+        with pytest.raises(IndexError):
+            p.update(-1, 1)     # task_id < 0 (distinct bounds branch)
+
+
+def test_set_total_out_of_range_raises():
+    with barflow.Progress(disable=True) as p:
+        p.add_task(total=10)
+        with pytest.raises(IndexError):
+            p.set_total(99, 5)
+
+
+def test_set_task_description_out_of_range_raises():
+    with barflow.Progress(disable=True) as p:
+        p.add_task(total=10)
+        with pytest.raises(IndexError):
+            p.set_task_description(99, "x")
+
+
+def test_set_description_with_no_tasks_raises():
+    with barflow.Progress(disable=True) as p:   # no total / no add_task
+        with pytest.raises(IndexError):
+            p.set_description("x")
+
+
+# ---- computed-state aliases / multi-task descriptions ----------------------
+
+def test_speed_is_rate_alias():
+    snap = capture_snapshots(4, lambda p: p.advance(4))
+    assert snap["speed"] == snap["rate"]
+
+
+def test_set_task_description_targets_named_task():
+    def drive(p):
+        p.add_task(total=4, desc="zero")   # id 0
+        p.add_task(total=4, desc="one")    # id 1
+        p.set_task_description(1, "renamed")
+    assert capture_task_snapshot(drive, 1)["description"] == "renamed"
+    assert capture_task_snapshot(drive, 0)["description"] == "zero"
+
+
+# ---- iterator protocol -----------------------------------------------------
+
+def test_progress_iteration_stops_at_total():
+    with barflow.Progress(total=3, disable=True) as p:
+        n = sum(1 for _ in p)
+        # The fetch_add-then-rollback leaves completed exactly on total,
+        # not total+1.
+        assert n == 3
+        assert p.completed == 3
+
+
+# ---- repr ------------------------------------------------------------------
+
+def test_repr_includes_task0_state():
+    with barflow.Progress(total=10, desc="dl", disable=True) as p:
+        p.advance(3)
+        r = repr(p)
+    assert r.startswith("Progress(")
+    assert "completed=3" in r
+    assert "total=10" in r
+    assert "desc='dl'" in r
+    assert "tasks=1" in r
+
+
+def test_repr_with_no_tasks():
+    with barflow.Progress(disable=True) as p:
+        assert repr(p) == "Progress(tasks=0)"
+
+
+def test_repr_escapes_special_chars_in_desc():
+    # A quote / backslash / newline in the desc must not produce an ambiguous
+    # repr — they are escaped so the desc='...' field stays unambiguous.
+    with barflow.Progress(total=10, desc="a'b\\c\nd", disable=True) as p:
+        r = repr(p)
+    assert "desc='a\\'b\\\\c\\nd'" in r

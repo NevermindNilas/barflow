@@ -68,3 +68,41 @@ def capture_snapshots(total, drive, *, timeout=2.0):
     if len(snaps) == baseline:
         raise AssertionError("CallbackColumn never fired a post-drive frame")
     return snaps[-1]
+
+
+def capture_task_snapshot(drive, want_id, *, timeout=2.0):
+    """Like `capture_snapshots`, but for a specific task id.
+
+    `capture_snapshots` returns the LAST task iterated each frame (highest
+    id), which is ambiguous for multi-task bars. This variant filters the
+    CallbackColumn to one `want_id` so per-task state (e.g. a renamed
+    description on task 1 vs. task 0) can be asserted unambiguously. `drive`
+    is responsible for creating the task(s) via `add_task`.
+    """
+    snaps: list[dict] = []
+
+    def _cb(task):
+        if task.task_id == want_id:
+            snaps.append({
+                "description": task.description,
+                "task_id": task.task_id,
+                "completed": task.completed,
+                "total": task.total,
+            })
+        return ""
+
+    p = barflow.Progress(C.CallbackColumn(_cb), disable=True)
+    p.__enter__()
+    try:
+        drive(p)
+        baseline = len(snaps)
+        deadline = time.monotonic() + timeout
+        while len(snaps) == baseline and time.monotonic() < deadline:
+            p.refresh()
+            time.sleep(0.01)
+    finally:
+        p.__exit__(None, None, None)
+
+    if len(snaps) == baseline:
+        raise AssertionError(f"CallbackColumn never fired for task {want_id}")
+    return snaps[-1]

@@ -350,6 +350,17 @@ BAR_STYLES: dict[str, dict] = {
         "right":    "",
     },
 
+    # Pac-Man devouring a row of pellets: ` ᗧ•••••`. The eaten path behind
+    # is blank, pellets `•` lie ahead, and the chomping mouth animates at the
+    # leading edge via the `pacman` tip below. Single-cell glyphs throughout.
+    "pacman": {
+        "fill":     " ",       # eaten — blank path behind Pac-Man
+        "empty":    "•",  # • pellet not yet eaten
+        "partials": [],
+        "left":     "",
+        "right":    "",
+    },
+
     # ---- Emoji glyph sets (2-cell wide; pair only with 2-cell partners) -
 
     # Fire emoji: `🔥🔥🔥🔥⬛⬛⬛⬛`.
@@ -397,15 +408,6 @@ BAR_STYLES: dict[str, dict] = {
         "right":    "",
     },
 
-    # Pacman vibe (ASCII safe-ish): `🟡🟡🟡🟡⚫⚫⚫⚫`.
-    "emoji_pacman": {
-        "fill":     "\U0001f7e1",  # 🟡
-        "empty":    "⚫",      # ⚫
-        "partials": [],
-        "left":     "",
-        "right":    "",
-    },
-
     # Heartbeat: `❤️❤️❤️❤️🖤🖤🖤🖤`.
     "emoji_heart": {
         "fill":     "❤️",  # ❤️
@@ -415,6 +417,58 @@ BAR_STYLES: dict[str, dict] = {
         "right":    "",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Animated leading-edge "tips"
+# ---------------------------------------------------------------------------
+#
+# A tip is a list of single-cell frames cycled at the bar's boundary cell by
+# the C core (indexed by frame_tick) whenever the bar is incomplete — the
+# alive-progress-style motion that keeps a determinate bar alive even while
+# its fill fraction is stalled. Attached here so every theme that selects one
+# of these glyph sets animates with zero theme-side wiring; `BarColumn` reads
+# it back via `tip_for`. Each frame must match its style's cell width (1 cell
+# for these — emoji styles are intentionally left tip-less).
+#
+# Kept OUT of the registry literal (and off "smooth"/"ascii"/"equals") so the
+# default bar keeps its precise static 8-level fill and the byte-exact render
+# tests stay deterministic.
+_TIPS: dict[str, list[str]] = {
+    "blocks":  ["▒", "▓", "█", "▓"],                 # ▒▓█▓
+    "shade":   ["░", "▒", "▓", "█", "▓", "▒"],  # ░▒▓█▓▒
+    "vapor":   ["·", "░", "▒", "▓", "█", "▓", "▒", "░"],
+    "braille": ["⡀", "⡄", "⡆", "⡇", "⣇", "⣧", "⣷", "⣿"],
+    "dots":    ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"],
+    "bubble":  ["◌", "○", "◎", "◉", "◎", "○"],   # ◌○◎◉◎○
+    "glow":    ["○", "◎", "●", "◎"],                  # ○◎●◎
+    "plasma":  ["▢", "▤", "▥", "▦", "▧", "▨", "▩", "▣"],
+    "bricks":  ["▱", "▮", "▰"],                            # ▱▮▰
+    "rail":    ["┄", "╌", "─", "▰"],                  # ┄╌─▰
+    "pixel":   ["▯", "▭", "▬", "▮"],                  # ▯▭▬▮
+    "diamond": ["◇", "◈", "◆", "◈"],                  # ◇◈◆◈
+    "sharp":   ["▷", "▸", "▶"],                            # ▷▸▶
+    "gem":     ["◇", "◈", "❖"],                            # ◇◈❖
+    "sparkle": ["✧", "✦", "✶", "✦"],                  # ✧✦✶✦
+    "pacman":  ["ᗧ", "●"],                               # ᗧ open → ● snap shut
+}
+for _name, _frames in _TIPS.items():
+    BAR_STYLES[_name]["tip"] = _frames
+
+
+def tip_for(spec) -> list[str]:
+    """Animated-tip frames for a style name or dict, or `[]` if it has none.
+
+    A fresh copy each call so callers can mutate without corrupting the
+    registry. Unknown names return `[]` rather than raising — a missing tip
+    is a no-op (static edge), not an error.
+    """
+    if isinstance(spec, str):
+        s = BAR_STYLES.get(spec)
+        return list(s.get("tip", [])) if s else []
+    if isinstance(spec, dict):
+        return list(spec.get("tip", []))
+    return []
 
 
 def get(name: str) -> dict:
@@ -447,4 +501,4 @@ def to_tuple(spec) -> tuple:
     )
 
 
-__all__ = ["BAR_STYLES", "get", "to_tuple"]
+__all__ = ["BAR_STYLES", "get", "to_tuple", "tip_for"]

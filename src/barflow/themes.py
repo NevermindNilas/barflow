@@ -25,6 +25,12 @@ import random as _random
 
 from . import columns as c
 
+# Fading comet-tail tip for smooth-fill themes: the boundary cell pulses
+# █→▒→░ into the empty track so the bar keeps moving even when stalled.
+# Coarse-glyph themes (blocks/shade/braille/…) inherit their own tip straight
+# from `bar_styles`, so only the smooth-bar flagships need this passed in.
+_SMOOTH_TIP = ["░", "▒", "▓", "█", "▓", "▒"]
+
 
 # ---------------------------------------------------------------------------
 # Utilitarian themes (minimal visual noise)
@@ -132,7 +138,7 @@ def neon():
     return [
         c.SpinnerColumn(name="dots2", style="bold #ff2fbf"), " ",
         c.DescriptionColumn(style="bold #00ffff"), " ",
-        c.BarColumn(width=35, style="bold #ff2fbf"), " ",
+        c.BarColumn(width=35, style="bold #ff2fbf", tip=_SMOOTH_TIP), " ",
         c.PercentColumn(style="bold #ffff00"), "  ",
         c.RateColumn(style="bold #00ffff"),
     ]
@@ -175,7 +181,7 @@ def fire():
     return [
         c.SpinnerColumn(name="triangle", style="bold #ff4500"), " ",
         c.DescriptionColumn(style="bold #ff6600"), " ",
-        c.BarColumn(width=35, style="bold #ff3300"), " ",
+        c.BarColumn(width=35, style="bold #ff3300", tip=_SMOOTH_TIP), " ",
         c.PercentColumn(style="bold #ffcc00"), "  ",
         c.RateColumn(style="#ff8800"),
     ]
@@ -186,7 +192,7 @@ def ocean():
     return [
         c.SpinnerColumn(name="dots", style="bold #4488ff"), " ",
         c.DescriptionColumn(style="bold #88ccff"), " ",
-        c.BarColumn(width=35, style="#0099ff"), " ",
+        c.BarColumn(width=35, style="#0099ff", tip=_SMOOTH_TIP), " ",
         c.PercentColumn(style="bold #66ddff"), " ",
         c.EtaColumn(style="dim #88ccff"),
     ]
@@ -262,6 +268,16 @@ def arrows_march():
         c.DescriptionColumn(style="bold cyan"), " ",
         c.BarColumn(width=25, style="bold bright_cyan", glyphs="arrows"), " ",
         c.PercentColumn(style="bold"),
+    ]
+
+
+def pacman():
+    """ᗧ Pac-Man devouring a row of pellets — chomping leading edge."""
+    return [
+        c.DescriptionColumn(style="bold #ffeb3b"), " ",
+        c.BarColumn(width=30, style="bold #ffeb3b", glyphs="pacman"), " ",
+        c.PercentColumn(style="bold #ffeb3b"), " ",
+        c.RateColumn(style="dim yellow"),
     ]
 
 
@@ -611,16 +627,6 @@ def sparkle_emoji():
     ]
 
 
-def pacman_emoji():
-    """🟡 pacman munching pellets."""
-    return [
-        c.DescriptionColumn(style="bold #ffeb3b"), " ",
-        c.BarColumn(width=15, style="", glyphs="emoji_pacman"), " ",
-        c.PercentColumn(style="bold #ffeb3b"), " ",
-        c.RateColumn(style="dim yellow"),
-    ]
-
-
 def heart_emoji():
     """❤️ heartbeat bar."""
     return [
@@ -748,7 +754,7 @@ def downloading():
     return [
         c.TextColumn("⬇ ", style="bold #00bfff"),
         c.DescriptionColumn(style="bold #00bfff"), "  ",
-        c.BarColumn(width=30, style="bold #00bfff"), " ",
+        c.BarColumn(width=30, style="bold #00bfff", tip=_SMOOTH_TIP), " ",
         c.PercentColumn(style="bold"), "  ",
         c.CountColumn(style="dim"), "  ",
         c.RateColumn(style="bold #00bfff"), "  eta ",
@@ -873,7 +879,7 @@ THEMES = {
     "sakura":       sakura_emoji,
     "storm":        storm_emoji,
     "sparkle":      sparkle_emoji,
-    "pacman":       pacman_emoji,
+    "pacman":       pacman,
     "heart_emoji":  heart_emoji,
     "moon":         moon_emoji,
     "weather":      weather_emoji,
@@ -928,7 +934,8 @@ __all__ = [
     "neon", "pastel", "retro", "matrix", "fire", "ocean", "ice", "sunset",
     "forest", "cyberpunk",
     # Playful / themed
-    "hearts", "stars", "arrows", "pipes", "shade", "line", "double", "round",
+    "hearts", "stars", "arrows", "pacman", "pipes", "shade", "line",
+    "double", "round",
     # Neon / synthwave
     "vaporwave", "synthwave", "lightning", "plasma", "acid", "midnight",
     "ember", "amber_crt", "miami", "gold_rush", "alien", "deep_sea", "magma",
@@ -937,7 +944,7 @@ __all__ = [
     "hacker", "binary", "curly", "march", "wave_ascii", "rail_ascii",
     # Emoji
     "fire_emoji", "rocket_emoji", "sakura_emoji", "storm_emoji",
-    "sparkle_emoji", "pacman_emoji", "heart_emoji", "moon_emoji",
+    "sparkle_emoji", "heart_emoji", "moon_emoji",
     "weather_emoji",
     # Brand
     "github_dark", "discord", "dracula", "solarized", "nord", "gruvbox",

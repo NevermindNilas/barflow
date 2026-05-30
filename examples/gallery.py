@@ -71,13 +71,13 @@ SECTIONS: dict[str, list[str]] = {
     ],
     "emoji": [
         "fire_emoji", "rocket", "sakura", "storm",
-        "sparkle", "pacman", "heart_emoji", "moon", "weather",
+        "sparkle", "heart_emoji", "moon", "weather",
     ],
     "brand": [
         "github_dark", "discord", "dracula", "solarized", "nord", "gruvbox",
     ],
     "playful": [
-        "hearts", "stars", "arrows", "pipes", "shade",
+        "hearts", "stars", "arrows", "pacman", "pipes", "shade",
         "line", "double", "round", "matrix",
         "fire", "ocean", "ice", "sunset", "forest",
     ],
@@ -102,6 +102,7 @@ def extract(cols):
         "bar_width": 30,
         "bar_ansi": "",
         "bar_glyphs": ("█", " ", [], "", ""),
+        "bar_tip": [],
         "spinner_frames": None,
         "spinner_ansi": "",
         "desc_ansi": "",
@@ -115,6 +116,8 @@ def extract(cols):
             out["bar_width"] = 30 if w is None or w < 0 else w
             out["bar_ansi"] = col[4] or ""
             out["bar_glyphs"] = col[5]
+            # 7th element (when present) is the animated leading-edge tip.
+            out["bar_tip"] = list(col[6]) if len(col) >= 7 else []
         elif kind == COL_SPINNER:
             out["spinner_frames"] = col[3]
             out["spinner_ansi"] = col[4] or ""
@@ -126,69 +129,121 @@ def extract(cols):
     return out
 
 
+# ----- Layout planning ----------------------------------------------------
+
+def plan_layout(all_parts, name_width, term_cols):
+    """Pick one bar display width for every row and size each theme's body so
+    its bar never overflows. Returns `bar_display`.
+
+    `bar_display` is the bar width (body + borders, in terminal columns) shared
+    by every row, capped to the terminal. Per-theme bar widths made the right
+    edge ragged, and a wide-glyph bar at its full theme width (lightning's
+    ⚡ × 30 = 60 cols) overflowed the margin entirely.
+
+    Each theme's body-cell count is sized against the WIDEST body glyph
+    (fill/empty/partials — some themes mix widths, e.g. lightning ⚡=2, ·=1),
+    so body + borders never exceeds `bar_display` at any fill; render_row
+    right-pads the rendered bar so right edges + the percent column line up.
+    """
+    all_parts = list(all_parts)
+
+    # row = name " " bar " " "100%" + 1-col right margin.
+    overhead = name_width + 1 + 1 + 4 + 1
+    bar_display = max(8, min(40, term_cols - overhead))
+
+    for p in all_parts:
+        fill, empty, partials, left, right = p["bar_glyphs"]
+        # The tip occupies the boundary cell, so its glyphs count toward the
+        # widest body glyph when sizing the body so a wide tip can't overflow.
+        glyph_w = max([cell_width(fill) or 1, cell_width(empty) or 1]
+                      + [cell_width(x) for x in partials]
+                      + [cell_width(x) for x in p.get("bar_tip", [])])
+        border_w = cell_width(left) + cell_width(right)
+        p["bar_width"] = max(1, (bar_display - border_w) // glyph_w)
+
+    return bar_display
+
+
 # ----- Per-row renderer ---------------------------------------------------
 
 def cell_width(s):
     """Display columns a glyph string occupies in a terminal.
 
-    Emoji and CJK render two columns wide; combining marks, ZWJ, and variation
-    selectors add none. Over-counting is safe here (the bar just ends a hair
-    short); under-counting is not (the row overflows and the percent clips), so
-    anything in the emoji planes is treated as width 2.
+    Emoji and CJK render two columns wide; combining marks and ZWJ add none.
+    Over-counting is safe here (the bar just ends a hair short); under-counting
+    is not (the row overflows and the percent clips), so anything in the emoji
+    planes is treated as width 2.
+
+    Variation-selector-16 (U+FE0F) is the tricky case: some terminals compose
+    `base + VS16` into a single 2-wide emoji, others paint the base glyph and
+    then a separate placeholder cell for the selector (so `⚡️` becomes ⚡ + a
+    blank, ~3 columns). We can't detect which, so we count VS16 as an extra
+    cell — the over-counting direction. That guarantees no overflow on the
+    placeholder terminals (where the storm bar's ⚡️/☁️ were running off the
+    right edge); on composing terminals the bar just ends a touch short.
     """
     w = 0
-    prev = 0  # display width of the most recent base glyph
     for ch in s:
         cp = ord(ch)
-        if cp == 0xFE0F:  # emoji variation selector forces the base to 2 cols
-            w += 2 - prev
-            prev = 2
+        if cp == 0xFE0F:            # VS16 — count a placeholder cell (worst case)
+            w += 1
             continue
         if unicodedata.combining(ch) or cp in (0x200D, 0xFE0E):  # ZWJ, text VS
             continue
-        prev = 2 if unicodedata.east_asian_width(ch) in ("W", "F") or cp >= 0x1F000 else 1
-        w += prev
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") or cp >= 0x1F000 else 1
     return w
 
 
-def build_bar(glyphs, width, fraction):
-    """Build one bar string from a 5-tuple glyphs spec at given fill fraction."""
+def build_bar(glyphs, width, fraction, tip=(), tick=0):
+    """Build one bar string from a 5-tuple glyphs spec at given fill fraction.
+
+    When `tip` is non-empty and the bar is incomplete, the boundary cell
+    cycles through the tip frames by `tick` instead of showing a static
+    partial — mirroring the C core's animated leading edge so the wall looks
+    like a live `barflow.Progress(theme=...)`.
+    """
     fill, empty, partials, left, right = glyphs
     cells = max(1, width)
     levels = len(partials) + 1
     total = cells * levels
     filled = int(fraction * total + 0.5)
-    full_cells = filled // levels
-    partial_idx = filled % levels
+    full_cells = min(cells, filled // levels)
 
     body = fill * full_cells
     remaining = cells - full_cells
-    if partial_idx > 0 and remaining > 0:
-        body += partials[partial_idx - 1]
+    if tip and fraction < 1.0 and remaining > 0:
+        body += tip[tick % len(tip)]
         remaining -= 1
+    else:
+        partial_idx = filled % levels
+        if partial_idx > 0 and remaining > 0:
+            body += partials[partial_idx - 1]
+            remaining -= 1
     body += empty * remaining
     return f"{left}{body}{right}"
 
 
-def render_row(name, parts, fraction, frame_tick, name_width):
-    """Render a single preset row at this frame."""
+def render_row(name, parts, fraction, name_width, bar_display, tick=0):
+    """Render a single preset row in a fixed grid that stacks vertically:
+        [name (name_width)] [bar (bar_display)] [pct]
+    Every row starts with the name (no per-theme spinner prefix, which made
+    the left edge ragged and flickered for animated spinners like thunder),
+    and the rendered bar is right-padded to `bar_display` display columns so
+    bar right edges and the percent column line up regardless of glyph width.
+    """
     name_label = f"\x1b[1;97m{name:<{name_width}}{RESET}"
 
-    spinner = ""
-    frames = parts["spinner_frames"]
-    if frames:
-        glyph = frames[frame_tick % len(frames)]
-        ansi = parts["spinner_ansi"]
-        spinner = f"{ansi}{glyph}{RESET} " if ansi else f"{glyph} "
-
-    bar_str = build_bar(parts["bar_glyphs"], parts["bar_width"], fraction)
-    bar_part = f"{parts['bar_ansi']}{bar_str}{RESET}" if parts["bar_ansi"] else bar_str
+    bar_str = build_bar(parts["bar_glyphs"], parts["bar_width"], fraction,
+                        parts.get("bar_tip", ()), tick)
+    bar_pad = " " * max(0, bar_display - cell_width(bar_str))
+    bar_core = f"{parts['bar_ansi']}{bar_str}{RESET}" if parts["bar_ansi"] else bar_str
+    bar_part = f"{bar_core}{bar_pad}"
 
     pct = f"{int(fraction * 100):3d}%"
     pct_color = "\x1b[1m" if fraction < 1.0 else "\x1b[1;92m"
     pct_part = f"{pct_color}{pct}{RESET}"
 
-    return f"{spinner}{name_label} {bar_part} {pct_part}"
+    return f"{name_label} {bar_part} {pct_part}"
 
 
 # ----- Showtime loop ------------------------------------------------------
@@ -218,26 +273,20 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
 
     rng = random.Random(seed)
     parts = {n: extract(themes.get(n)) for n in presets}
-    speeds = {n: rng.uniform(0.6, 1.6) for n in presets}  # finish-time multiplier
+    # Per-preset fill rate, normalized below against the slowest pick so the
+    # SLOWEST bar reaches 100% right at `total_frames` and faster ones finish
+    # earlier and hold. Without the normalization a bar's cumulative fill is
+    # speed*(frames/total_frames), so any speed < 1 ran out of frame budget
+    # and froze below 100% (a 0.6 bar topped out at ~70%) — the bars that
+    # "never complete".
+    rates = {n: rng.uniform(0.6, 1.6) for n in presets}
+    slowest = min(rates.values())
     fractions = {n: 0.0 for n in presets}
     name_width = max(len(n) for n in presets)
     n_rows = len(presets)
 
-    # Cap each bar so the whole row fits one terminal line. A cell costs as many
-    # columns as its fill glyph is wide, so emoji bars (lightning's ⚡, width 2)
-    # need half the cells of an ASCII bar to occupy the same space. Without this
-    # the row overflows the right margin and — now that autowrap is off — the
-    # trailing percent is clipped clean off ("lightning … ⚡⚡ %").
     term_cols = shutil.get_terminal_size().columns
-    for p in parts.values():
-        fill, _empty, _partials, left, right = p["bar_glyphs"]
-        glyph_w = cell_width(fill) or 1
-        spinner_w = 2 if p["spinner_frames"] else 0
-        # spinner + name + " " + bar-brackets + " 100%" + 1-col margin
-        overhead = (spinner_w + name_width + 1 + cell_width(left)
-                    + cell_width(right) + 5 + 1)
-        max_cells = max(1, (term_cols - overhead) // glyph_w)
-        p["bar_width"] = min(p["bar_width"], max_cells)
+    bar_display = plan_layout(parts.values(), name_width, term_cols)
     frame_delay = 1.0 / fps
     total_frames = max(1, int(duration * fps))
 
@@ -255,14 +304,22 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
     drew_once = False
     t_start = time.perf_counter()
     try:
-        for frame in range(total_frames + fps):  # extra slack so all bars hit 100%
+        # Slowest bar finishes at total_frames; a little slack absorbs fp
+        # rounding. The all-complete check below ends the loop early once the
+        # last bar lands, so this is just an upper bound.
+        for frame in range(total_frames + max(2, fps // 2)):
             frame_start = time.perf_counter()
             for n in presets:
-                step = speeds[n] / total_frames
+                step = rates[n] / (slowest * total_frames)
                 fractions[n] = min(1.0, fractions[n] + step)
 
+            # Cycle the animated tip at ~12 Hz regardless of the frame rate, so
+            # the leading edge reads as motion instead of strobing at full fps
+            # (which on a slow bar looked like the fill jittering back/forth).
+            tip_tick = int(frame * 12 / fps)
             lines = [
-                render_row(n, parts[n], fractions[n], frame, name_width)
+                render_row(n, parts[n], fractions[n], name_width, bar_display,
+                           tip_tick)
                 for n in presets
             ]
 
@@ -304,9 +361,9 @@ def main():
     ap.add_argument("--only", nargs="+", default=None,
                     help="explicit preset list (overrides --section)")
     ap.add_argument("--duration", type=float, default=6.0,
-                    help="approximate seconds for fastest bar to finish (default 6)")
-    ap.add_argument("--fps", type=int, default=60,
-                    help="target frames per second (default 60)")
+                    help="approximate seconds for the LAST bar to finish (default 6)")
+    ap.add_argument("--fps", type=int, default=30,
+                    help="target frames per second (default 30)")
     ap.add_argument("--seed", type=int, default=None,
                     help="seed for per-preset speed randomness")
     ap.add_argument("--list", action="store_true",

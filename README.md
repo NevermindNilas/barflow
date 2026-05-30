@@ -192,7 +192,14 @@ short-lived jobs. Measured by `bench_first_frame.py`.
 4 tasks × 250 K ticks each, driven round-robin from one thread
 (`bench_multibar.py`). BarFlow stays lock-free — every task has
 its own cache-line-padded counter, and the render thread walks
-the task vector under a mutex that the hot path never touches.
+the task vector under a mutex that the single-task hot path never
+touches. The multi-task `update(task_id, n)` does take that mutex
+to resolve the task pointer, but holds the GIL across it — skipping
+the per-call thread-state save/restore — whenever no `CallbackColumn`
+is present, which is the only case where the render thread needs the
+GIL while holding the lock. (`bench_multibar.py` numbers above are a
+pinned Python 3.13 run; the GIL-held path's speedup is larger on
+3.14, where GIL save/restore costs more.)
 
 ### Metadata churn (description updated every 1 K iters)
 
@@ -298,9 +305,10 @@ free-threaded `cp313t` / `cp314t` builds.
   UTF-16 transcoded `WriteConsoleW` chunked at 32 KB, legacy-console
   fallback. No `colorama` dependency. A reusable `wscratch`
   transcoding buffer means steady-state frames are zero-alloc.
-- **Multi-task + columns.** 9 built-in column types
-  (description/bar/percent/count/rate/elapsed/eta/spinner/text),
-  rich-style column API, themes, ANSI cursor stacking for nested bars.
+- **Multi-task + columns.** 10 built-in column types
+  (description/bar/percent/count/rate/elapsed/eta/spinner/text — all in
+  C++ — plus a Python-rendered callback column), rich-style column API,
+  themes, ANSI cursor stacking for nested bars.
   `Progress.set_description(str)` and `set_task_description(task_id, str)`
   expose metadata churn without touching the lock-free hot path.
 - **Spinner DSL.** Compositional factories

@@ -12,7 +12,7 @@ prints the preset name in bright white so you can match what you like.
 Sections:
     neon       — vaporwave, synthwave, lightning, plasma, acid, midnight, ...
     ascii      — hacker, binary, curly, march, wave, rail_ascii
-    emoji      — rocket, sakura, storm, sparkle, pacman, heart, moon, ...
+    emoji      — rocket, sakura, storm, sparkle, heart, moon, ...
     brand      — github_dark, discord, dracula, solarized, nord, gruvbox
     specialized — tiny, detailed, downloading, building, training
     classic    — original 27 themes (utilitarian, colorful, playful)
@@ -45,7 +45,7 @@ SECTIONS: dict[str, list[str]] = {
     ],
     "emoji": [
         "fire_emoji", "rocket_emoji", "sakura_emoji", "storm_emoji",
-        "sparkle_emoji", "pacman_emoji", "heart_emoji", "moon_emoji",
+        "sparkle_emoji", "heart_emoji", "moon_emoji",
         "weather_emoji",
     ],
     "brand": [

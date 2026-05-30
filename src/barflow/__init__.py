@@ -16,12 +16,21 @@ __all__ = ["Progress", "Tracker", "track", "__version__"]
 
 def track(iterable, total=None, desc=None, *, columns=None, theme=None,
           task_id=0, disable=False, min_interval=0.05, capture_output=False):
-    """Wrap `iterable` in a live progress bar. Returns a Tracker iterator.
+    """Wrap `iterable` in a live progress bar. Returns an iterator.
 
     Fast path: no columns, no theme, no capture_output → goes straight to
     `_core.Progress` (one C-extension construction, no Python subclass).
     Slow path: any decoration → route through the Python `Progress` class.
     """
+    if task_id != 0:
+        # track() always builds a single-task (task 0) bar; a non-zero
+        # task_id would otherwise reach the C Tracker bounds check and raise
+        # an opaque "task_id out of range". Fail fast with guidance instead.
+        raise ValueError(
+            "track() creates a single-task bar, so task_id must be 0. "
+            "For multiple bars use barflow.Progress + add_task()."
+        )
+
     if total is None:
         try:
             total = len(iterable)
@@ -48,7 +57,24 @@ def track(iterable, total=None, desc=None, *, columns=None, theme=None,
         )
 
     progress.__enter__()
-    return Tracker(iter(iterable), progress, task_id=task_id, owns_progress=True)
+    tracker = Tracker(iter(iterable), progress, task_id=task_id, owns_progress=True)
+    if capture_output:
+        # The C Tracker tears the progress down via close(), which bypasses
+        # the Python __exit__ that uninstalls stdout/stderr capture — so an
+        # exhausted track(capture_output=True) would otherwise leave sys.stdout
+        # permanently replaced. Guard the iteration so __exit__ always runs.
+        return _capture_guard(tracker, progress)
+    return tracker
+
+
+def _capture_guard(tracker, progress):
+    """Yield from `tracker`, guaranteeing `progress.__exit__` runs on
+    exhaustion, early break (generator close), or exception — so the
+    stdout/stderr capture is always uninstalled."""
+    try:
+        yield from tracker
+    finally:
+        progress.__exit__(None, None, None)
 
 
 # ---- Lazy layer ------------------------------------------------------------
