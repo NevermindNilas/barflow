@@ -126,6 +126,48 @@ def extract(cols):
     return out
 
 
+# ----- Layout planning ----------------------------------------------------
+
+def plan_layout(all_parts, name_width, term_cols):
+    """Pick a uniform spinner-cell width and bar display width for every row,
+    and set each part's `bar_width` so its body never overflows.
+
+    Returns `(spin_w, bar_display)`:
+      * `spin_w` — display columns reserved for the spinner glyph (0 if the
+        lineup has no spinners). render_row pads each frame to this so 1-, 2-,
+        and 3-column glyphs (and spinner-less rows) align the name column.
+      * `bar_display` — one bar display width (body + borders, terminal
+        columns) shared by every row, capped to the terminal. Per-theme bar
+        widths made the right edge ragged, and a wide-glyph bar at its full
+        theme width (lightning's ⚡ × 30 = 60 cols) overflowed the margin.
+
+    Each theme's body-cell count is sized against the WIDEST body glyph
+    (fill/empty/partials — some themes mix widths, e.g. lightning ⚡=2, ·=1),
+    so body + borders never exceeds `bar_display` at any fill; render_row
+    right-pads the rendered bar so right edges + the percent column line up.
+    """
+    all_parts = list(all_parts)
+
+    def _max_frame_w(p):
+        frames = p["spinner_frames"]
+        return max((cell_width(f) for f in frames), default=0) if frames else 0
+    spin_w = max((_max_frame_w(p) for p in all_parts), default=0)
+
+    # row = [spinner cell + sep] name " " bar " " "100%" + 1-col right margin.
+    spin_field = (spin_w + 1) if spin_w else 0
+    overhead = spin_field + name_width + 1 + 1 + 4 + 1
+    bar_display = max(8, min(40, term_cols - overhead))
+
+    for p in all_parts:
+        fill, empty, partials, left, right = p["bar_glyphs"]
+        glyph_w = max([cell_width(fill) or 1, cell_width(empty) or 1]
+                      + [cell_width(x) for x in partials])
+        border_w = cell_width(left) + cell_width(right)
+        p["bar_width"] = max(1, (bar_display - border_w) // glyph_w)
+
+    return spin_w, bar_display
+
+
 # ----- Per-row renderer ---------------------------------------------------
 
 def cell_width(s):
@@ -170,19 +212,39 @@ def build_bar(glyphs, width, fraction):
     return f"{left}{body}{right}"
 
 
-def render_row(name, parts, fraction, frame_tick, name_width):
-    """Render a single preset row at this frame."""
+def render_row(name, parts, fraction, frame_tick, name_width, spin_w, bar_display):
+    """Render a single preset row at this frame.
+
+    Layout is a fixed-width grid so every row stacks vertically:
+        [spinner cell (spin_w) + sep] [name (name_width)] [bar (bar_display)] [pct]
+    The spinner cell is padded to the widest spinner glyph in the lineup
+    (and blank for spinner-less rows), and the rendered bar is right-padded
+    to `bar_display` display columns — so name columns, bar right edges, and
+    the percent column all line up regardless of glyph widths.
+    """
+    # Fixed-width spinner cell (+1 separator) so a 1-, 2-, or 3-column glyph
+    # — or no spinner at all — leaves the name starting at the same column.
+    # Pad per frame so a mixed-width frame set (e.g. rocket "3" → "🚀") does
+    # not jitter the name horizontally.
+    if spin_w:
+        frames = parts["spinner_frames"]
+        if frames:
+            glyph = frames[frame_tick % len(frames)]
+            pad = " " * max(0, spin_w - cell_width(glyph))
+            ansi = parts["spinner_ansi"]
+            core = f"{ansi}{glyph}{RESET}" if ansi else glyph
+            spinner = f"{core}{pad} "
+        else:
+            spinner = " " * (spin_w + 1)
+    else:
+        spinner = ""
+
     name_label = f"\x1b[1;97m{name:<{name_width}}{RESET}"
 
-    spinner = ""
-    frames = parts["spinner_frames"]
-    if frames:
-        glyph = frames[frame_tick % len(frames)]
-        ansi = parts["spinner_ansi"]
-        spinner = f"{ansi}{glyph}{RESET} " if ansi else f"{glyph} "
-
     bar_str = build_bar(parts["bar_glyphs"], parts["bar_width"], fraction)
-    bar_part = f"{parts['bar_ansi']}{bar_str}{RESET}" if parts["bar_ansi"] else bar_str
+    bar_pad = " " * max(0, bar_display - cell_width(bar_str))
+    bar_core = f"{parts['bar_ansi']}{bar_str}{RESET}" if parts["bar_ansi"] else bar_str
+    bar_part = f"{bar_core}{bar_pad}"
 
     pct = f"{int(fraction * 100):3d}%"
     pct_color = "\x1b[1m" if fraction < 1.0 else "\x1b[1;92m"
@@ -223,21 +285,8 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
     name_width = max(len(n) for n in presets)
     n_rows = len(presets)
 
-    # Cap each bar so the whole row fits one terminal line. A cell costs as many
-    # columns as its fill glyph is wide, so emoji bars (lightning's ⚡, width 2)
-    # need half the cells of an ASCII bar to occupy the same space. Without this
-    # the row overflows the right margin and — now that autowrap is off — the
-    # trailing percent is clipped clean off ("lightning … ⚡⚡ %").
     term_cols = shutil.get_terminal_size().columns
-    for p in parts.values():
-        fill, _empty, _partials, left, right = p["bar_glyphs"]
-        glyph_w = cell_width(fill) or 1
-        spinner_w = 2 if p["spinner_frames"] else 0
-        # spinner + name + " " + bar-brackets + " 100%" + 1-col margin
-        overhead = (spinner_w + name_width + 1 + cell_width(left)
-                    + cell_width(right) + 5 + 1)
-        max_cells = max(1, (term_cols - overhead) // glyph_w)
-        p["bar_width"] = min(p["bar_width"], max_cells)
+    spin_w, bar_display = plan_layout(parts.values(), name_width, term_cols)
     frame_delay = 1.0 / fps
     total_frames = max(1, int(duration * fps))
 
@@ -262,7 +311,8 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
                 fractions[n] = min(1.0, fractions[n] + step)
 
             lines = [
-                render_row(n, parts[n], fractions[n], frame, name_width)
+                render_row(n, parts[n], fractions[n], frame, name_width,
+                           spin_w, bar_display)
                 for n in presets
             ]
 
