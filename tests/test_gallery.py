@@ -31,46 +31,56 @@ def _load_gallery():
 g = _load_gallery()
 
 
-def _row_widths(section, term):
+def _render_rows(section, term):
     lineup = [n for n in g.SECTIONS[section] if n in themes.THEMES]
     parts = {n: g.extract(themes.get(n)) for n in lineup}
     name_width = max(len(n) for n in lineup)
-    spin_w, bar_display = g.plan_layout(parts.values(), name_width, term)
-    widths = []
+    bar_display = g.plan_layout(parts.values(), name_width, term)
+    rows = []  # (name, plain_line, width)
     for frac in (0.0, 0.5, 1.0):
-        for tick in (0, 1, 3, 7):
-            for n in lineup:
-                line = g.render_row(n, parts[n], frac, tick,
-                                    name_width, spin_w, bar_display)
-                widths.append(g.cell_width(ANSI.sub("", line)))
-    return widths, spin_w, bar_display
+        for n in lineup:
+            line = g.render_row(n, parts[n], frac, name_width, bar_display)
+            plain = ANSI.sub("", line)
+            rows.append((n, plain, g.cell_width(plain)))
+    return rows, bar_display
 
 
 @pytest.mark.parametrize("section,term", [
     ("all", 120),
     ("all", 50),     # narrow: bar must clamp
     ("all", 200),    # wide: bar caps at 40
-    ("emoji", 80),
-    ("ascii", 120),  # no spinners
+    ("emoji", 80),   # VS16 emoji (storm) must not overflow
+    ("ascii", 120),
     ("neon", 100),
 ])
 def test_rows_align_and_never_overflow(section, term):
-    widths, _spin_w, _bar = _row_widths(section, term)
-    assert len(set(widths)) == 1, f"ragged rows for {section}@{term}: {sorted(set(widths))}"
+    rows, _bar = _render_rows(section, term)
+    widths = {w for _n, _p, w in rows}
+    assert len(widths) == 1, f"ragged rows for {section}@{term}: {sorted(widths)}"
     assert max(widths) <= term, f"row overflows terminal for {section}@{term}"
 
 
-def test_ascii_section_reserves_no_spinner_cell():
-    # No preset in the ascii lineup has a spinner, so no spinner column.
-    _widths, spin_w, _bar = _row_widths("ascii", 120)
-    assert spin_w == 0
+def test_rows_start_with_name_not_a_spinner():
+    # Every row begins with the (left-justified) preset name — no per-theme
+    # spinner prefix, so the left edge is uniform.
+    rows, _bar = _render_rows("all", 120)
+    for name, plain, _w in rows:
+        assert plain.startswith(name), f"{name!r} row starts with {plain[:8]!r}"
+
+
+def test_storm_emoji_bar_fits():
+    # Regression for the VS16 over-count: storm's ⚡️/☁️ bar must stay within
+    # the uniform width on terminals that render the selector as a placeholder.
+    rows, _bar = _render_rows("emoji", 80)
+    storm = [w for n, _p, w in rows if n == "storm"]
+    assert storm and max(storm) <= 80
 
 
 def test_bar_display_caps_at_40_on_wide_terminal():
-    _widths, _spin_w, bar_display = _row_widths("all", 300)
+    _rows, bar_display = _render_rows("all", 300)
     assert bar_display == 40
 
 
 def test_narrow_terminal_clamps_bar_display():
-    _widths, _spin_w, bar_display = _row_widths("all", 50)
+    _rows, bar_display = _render_rows("all", 50)
     assert bar_display < 40

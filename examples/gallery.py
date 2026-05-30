@@ -129,17 +129,13 @@ def extract(cols):
 # ----- Layout planning ----------------------------------------------------
 
 def plan_layout(all_parts, name_width, term_cols):
-    """Pick a uniform spinner-cell width and bar display width for every row,
-    and set each part's `bar_width` so its body never overflows.
+    """Pick one bar display width for every row and size each theme's body so
+    its bar never overflows. Returns `bar_display`.
 
-    Returns `(spin_w, bar_display)`:
-      * `spin_w` — display columns reserved for the spinner glyph (0 if the
-        lineup has no spinners). render_row pads each frame to this so 1-, 2-,
-        and 3-column glyphs (and spinner-less rows) align the name column.
-      * `bar_display` — one bar display width (body + borders, terminal
-        columns) shared by every row, capped to the terminal. Per-theme bar
-        widths made the right edge ragged, and a wide-glyph bar at its full
-        theme width (lightning's ⚡ × 30 = 60 cols) overflowed the margin.
+    `bar_display` is the bar width (body + borders, in terminal columns) shared
+    by every row, capped to the terminal. Per-theme bar widths made the right
+    edge ragged, and a wide-glyph bar at its full theme width (lightning's
+    ⚡ × 30 = 60 cols) overflowed the margin entirely.
 
     Each theme's body-cell count is sized against the WIDEST body glyph
     (fill/empty/partials — some themes mix widths, e.g. lightning ⚡=2, ·=1),
@@ -148,14 +144,8 @@ def plan_layout(all_parts, name_width, term_cols):
     """
     all_parts = list(all_parts)
 
-    def _max_frame_w(p):
-        frames = p["spinner_frames"]
-        return max((cell_width(f) for f in frames), default=0) if frames else 0
-    spin_w = max((_max_frame_w(p) for p in all_parts), default=0)
-
-    # row = [spinner cell + sep] name " " bar " " "100%" + 1-col right margin.
-    spin_field = (spin_w + 1) if spin_w else 0
-    overhead = spin_field + name_width + 1 + 1 + 4 + 1
+    # row = name " " bar " " "100%" + 1-col right margin.
+    overhead = name_width + 1 + 1 + 4 + 1
     bar_display = max(8, min(40, term_cols - overhead))
 
     for p in all_parts:
@@ -165,7 +155,7 @@ def plan_layout(all_parts, name_width, term_cols):
         border_w = cell_width(left) + cell_width(right)
         p["bar_width"] = max(1, (bar_display - border_w) // glyph_w)
 
-    return spin_w, bar_display
+    return bar_display
 
 
 # ----- Per-row renderer ---------------------------------------------------
@@ -173,23 +163,28 @@ def plan_layout(all_parts, name_width, term_cols):
 def cell_width(s):
     """Display columns a glyph string occupies in a terminal.
 
-    Emoji and CJK render two columns wide; combining marks, ZWJ, and variation
-    selectors add none. Over-counting is safe here (the bar just ends a hair
-    short); under-counting is not (the row overflows and the percent clips), so
-    anything in the emoji planes is treated as width 2.
+    Emoji and CJK render two columns wide; combining marks and ZWJ add none.
+    Over-counting is safe here (the bar just ends a hair short); under-counting
+    is not (the row overflows and the percent clips), so anything in the emoji
+    planes is treated as width 2.
+
+    Variation-selector-16 (U+FE0F) is the tricky case: some terminals compose
+    `base + VS16` into a single 2-wide emoji, others paint the base glyph and
+    then a separate placeholder cell for the selector (so `⚡️` becomes ⚡ + a
+    blank, ~3 columns). We can't detect which, so we count VS16 as an extra
+    cell — the over-counting direction. That guarantees no overflow on the
+    placeholder terminals (where the storm bar's ⚡️/☁️ were running off the
+    right edge); on composing terminals the bar just ends a touch short.
     """
     w = 0
-    prev = 0  # display width of the most recent base glyph
     for ch in s:
         cp = ord(ch)
-        if cp == 0xFE0F:  # emoji variation selector forces the base to 2 cols
-            w += 2 - prev
-            prev = 2
+        if cp == 0xFE0F:            # VS16 — count a placeholder cell (worst case)
+            w += 1
             continue
         if unicodedata.combining(ch) or cp in (0x200D, 0xFE0E):  # ZWJ, text VS
             continue
-        prev = 2 if unicodedata.east_asian_width(ch) in ("W", "F") or cp >= 0x1F000 else 1
-        w += prev
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") or cp >= 0x1F000 else 1
     return w
 
 
@@ -212,33 +207,14 @@ def build_bar(glyphs, width, fraction):
     return f"{left}{body}{right}"
 
 
-def render_row(name, parts, fraction, frame_tick, name_width, spin_w, bar_display):
-    """Render a single preset row at this frame.
-
-    Layout is a fixed-width grid so every row stacks vertically:
-        [spinner cell (spin_w) + sep] [name (name_width)] [bar (bar_display)] [pct]
-    The spinner cell is padded to the widest spinner glyph in the lineup
-    (and blank for spinner-less rows), and the rendered bar is right-padded
-    to `bar_display` display columns — so name columns, bar right edges, and
-    the percent column all line up regardless of glyph widths.
+def render_row(name, parts, fraction, name_width, bar_display):
+    """Render a single preset row in a fixed grid that stacks vertically:
+        [name (name_width)] [bar (bar_display)] [pct]
+    Every row starts with the name (no per-theme spinner prefix, which made
+    the left edge ragged and flickered for animated spinners like thunder),
+    and the rendered bar is right-padded to `bar_display` display columns so
+    bar right edges and the percent column line up regardless of glyph width.
     """
-    # Fixed-width spinner cell (+1 separator) so a 1-, 2-, or 3-column glyph
-    # — or no spinner at all — leaves the name starting at the same column.
-    # Pad per frame so a mixed-width frame set (e.g. rocket "3" → "🚀") does
-    # not jitter the name horizontally.
-    if spin_w:
-        frames = parts["spinner_frames"]
-        if frames:
-            glyph = frames[frame_tick % len(frames)]
-            pad = " " * max(0, spin_w - cell_width(glyph))
-            ansi = parts["spinner_ansi"]
-            core = f"{ansi}{glyph}{RESET}" if ansi else glyph
-            spinner = f"{core}{pad} "
-        else:
-            spinner = " " * (spin_w + 1)
-    else:
-        spinner = ""
-
     name_label = f"\x1b[1;97m{name:<{name_width}}{RESET}"
 
     bar_str = build_bar(parts["bar_glyphs"], parts["bar_width"], fraction)
@@ -250,7 +226,7 @@ def render_row(name, parts, fraction, frame_tick, name_width, spin_w, bar_displa
     pct_color = "\x1b[1m" if fraction < 1.0 else "\x1b[1;92m"
     pct_part = f"{pct_color}{pct}{RESET}"
 
-    return f"{spinner}{name_label} {bar_part} {pct_part}"
+    return f"{name_label} {bar_part} {pct_part}"
 
 
 # ----- Showtime loop ------------------------------------------------------
@@ -286,7 +262,7 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
     n_rows = len(presets)
 
     term_cols = shutil.get_terminal_size().columns
-    spin_w, bar_display = plan_layout(parts.values(), name_width, term_cols)
+    bar_display = plan_layout(parts.values(), name_width, term_cols)
     frame_delay = 1.0 / fps
     total_frames = max(1, int(duration * fps))
 
@@ -311,8 +287,7 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
                 fractions[n] = min(1.0, fractions[n] + step)
 
             lines = [
-                render_row(n, parts[n], fractions[n], frame, name_width,
-                           spin_w, bar_display)
+                render_row(n, parts[n], fractions[n], name_width, bar_display)
                 for n in presets
             ]
 
