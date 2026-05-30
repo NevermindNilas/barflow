@@ -219,3 +219,11 @@ def test_repr_includes_task0_state():
 def test_repr_with_no_tasks():
     with barflow.Progress(disable=True) as p:
         assert repr(p) == "Progress(tasks=0)"
+
+
+def test_repr_escapes_special_chars_in_desc():
+    # A quote / backslash / newline in the desc must not produce an ambiguous
+    # repr — they are escaped so the desc='...' field stays unambiguous.
+    with barflow.Progress(total=10, desc="a'b\\c\nd", disable=True) as p:
+        r = repr(p)
+    assert "desc='a\\'b\\\\c\\nd'" in r

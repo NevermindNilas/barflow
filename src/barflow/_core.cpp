@@ -2369,8 +2369,19 @@ PyObject* Progress_repr(PyProgress* self) {
         if (total > 0) format_number(out, total);
         else           out += "None";
         if (!desc.empty()) {
+            // Escape so a desc containing quotes/backslashes/control chars
+            // can't produce an ambiguous repr (e.g. desc='a'b').
             out += ", desc='";
-            out += desc;
+            for (char ch : desc) {
+                switch (ch) {
+                    case '\\': out += "\\\\"; break;
+                    case '\'': out += "\\'";  break;
+                    case '\n': out += "\\n";  break;
+                    case '\r': out += "\\r";  break;
+                    case '\t': out += "\\t";  break;
+                    default:   out += ch;     break;
+                }
+            }
             out += '\'';
         }
         out += ", tasks=";

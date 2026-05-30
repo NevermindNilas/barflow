@@ -82,6 +82,31 @@ def test_atrack_supports_string_shorthand_columns():
     assert asyncio.run(run()) == [0, 1, 2]
 
 
+def test_atrack_capture_output_restores_stdout_on_exhaust():
+    import sys
+    saved = sys.stdout
+
+    async def run():
+        async for _ in aio.atrack(_agen(5), total=5, capture_output=True):
+            pass
+    asyncio.run(run())
+    assert sys.stdout is saved
+
+
+def test_atrack_capture_output_restores_stdout_on_break():
+    # Early break must still uninstall capture (the _acapture_guard finally
+    # runs on async-gen close / loop shutdown_asyncgens), not leak until GC.
+    import sys
+    saved = sys.stdout
+
+    async def run():
+        async for x in aio.atrack(_agen(100), total=100, capture_output=True):
+            if x == 2:
+                break
+    asyncio.run(run())
+    assert sys.stdout is saved
+
+
 def test_atrack_rejects_nonzero_task_id():
     async def run():
         async for _ in aio.atrack(_agen(3), total=3, disable=True, task_id=1):
