@@ -151,7 +151,9 @@ def test_update_out_of_range_raises():
     with barflow.Progress(disable=True) as p:
         p.add_task(total=10)
         with pytest.raises(IndexError):
-            p.update(99, 1)
+            p.update(99, 1)     # task_id >= n_tasks
+        with pytest.raises(IndexError):
+            p.update(-1, 1)     # task_id < 0 (distinct bounds branch)
 
 
 def test_set_total_out_of_range_raises():

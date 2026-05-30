@@ -4,6 +4,10 @@ A column is represented to the C core as a 5-tuple:
 
     (type: int, text: str, width: int, frames: list[str]|None, style: str)
 
+BarColumn appends a 6th element (the glyph 5-tuple) and, when it carries an
+animated leading-edge tip, a 7th (the list of tip frames). CallbackColumn's
+6th element is its Python callable.
+
 Every factory accepts a `style=` keyword that takes a
 `barflow.style`-parseable string: named colors, hex colors, 256-color
 indexes, text styles (bold/italic/underline/...), and backgrounds —
@@ -20,6 +24,16 @@ from ._core import (
     COL_RATE, COL_ELAPSED, COL_ETA, COL_SPINNER, COL_CALLBACK,
 )
 from .style import style as _style
+
+# Lazily-bound helpers, cached on first use. Keeping these out of the
+# module-level import list means `import barflow.columns` does not pull in
+# bar_styles / spinners (preserving cold-import laziness for text-only
+# column sets), while caching the resolved object avoids re-running the
+# `from . import X` machinery (_handle_fromlist / parent) on every factory
+# call — measurable on repeated Progress construction.
+_to_tuple = None   # bar_styles.to_tuple
+_tip_for = None    # bar_styles.tip_for
+_SPINNERS = None   # spinners.SPINNERS
 
 
 def _resolve(style=None, color=None):
@@ -42,7 +56,7 @@ def DescriptionColumn(*, style=None, color=None):
     return (COL_DESCRIPTION, "", 0, None, _resolve(style, color))
 
 
-def BarColumn(width=40, *, style="cyan", color=None, glyphs="smooth"):
+def BarColumn(width=40, *, style="cyan", color=None, glyphs="smooth", tip=None):
     """A progress bar with customizable glyphs and style.
 
     `width`   character width of the bar body (excludes borders). 40.
@@ -59,15 +73,37 @@ def BarColumn(width=40, *, style="cyan", color=None, glyphs="smooth"):
               "pipe", "pipes", "blocks") or a dict with keys
               `fill`, `empty`, `partials`, `left`, `right` to build
               a custom set.
+    `tip`     animated leading-edge frames (alive-progress-style motion):
+              the boundary cell cycles through them while the bar is
+              incomplete. `None` (default) inherits the glyph style's
+              built-in tip if it has one; pass a list of single-cell
+              strings to set one explicitly, a style name to borrow that
+              style's tip, or `[]` to force a static edge.
     `color`   backward-compat alias for `style`.
     """
-    from .bar_styles import to_tuple
-    g = to_tuple(glyphs)
+    global _to_tuple, _tip_for
+    if _to_tuple is None:
+        from .bar_styles import to_tuple as _tt, tip_for as _tf
+        _to_tuple = _tt
+        _tip_for = _tf
+    g = _to_tuple(glyphs)
     # -1 is the on-the-wire sentinel for "flex width". Keeps the column
     # tuple schema flat — the C core detects width < 0 and flips the
     # column's flex flag on.
     w = -1 if width is None else int(width)
-    return (COL_BAR, "", w, None, _resolve(style, color), g)
+    # Resolve the tip: None inherits the glyph style's built-in tip; a str
+    # borrows another style's; anything else is taken as an explicit frame
+    # list (so `tip=[]` deliberately disables an inherited one).
+    if tip is None:
+        tip_frames = _tip_for(glyphs)
+    elif isinstance(tip, str):
+        tip_frames = _tip_for(tip)
+    else:
+        tip_frames = list(tip)
+    base = (COL_BAR, "", w, None, _resolve(style, color), g)
+    # Emit the 7-tuple form only when a tip exists so tip-less bars keep the
+    # exact 6-tuple wire shape the rest of the code (and tests) expect.
+    return base + (tip_frames,) if tip_frames else base
 
 
 def PercentColumn(*, style=None, color=None):
@@ -98,8 +134,11 @@ def EtaColumn(*, style=None, color=None):
 def SpinnerColumn(frames=None, *, name="dots", style=None, color=None):
     """Animated spinner. `frames` overrides `name`; both fall back to dots."""
     if frames is None:
-        from .spinners import SPINNERS
-        frames = SPINNERS.get(name, SPINNERS["dots"])
+        global _SPINNERS
+        if _SPINNERS is None:
+            from .spinners import SPINNERS as _S
+            _SPINNERS = _S
+        frames = _SPINNERS.get(name, _SPINNERS["dots"])
     return (COL_SPINNER, "", 0, list(frames), _resolve(style, color))
 
 
@@ -125,14 +164,15 @@ def resolve_columns(columns):
     """Turn a mixed list of factories and strings into column tuples.
 
     Bare strings become TextColumn. Factory tuples (5-tuple for most
-    columns, 6-tuple for BarColumn with glyphs) are passed through.
+    columns, 6-tuple for BarColumn with glyphs, 7-tuple for a BarColumn
+    that also carries an animated tip) are passed through.
     """
     out = []
     for c in columns:
         t = type(c)
         if t is str:
             out.append((COL_TEXT, c, 0, None, ""))
-        elif t is tuple and len(c) in (5, 6):
+        elif t is tuple and len(c) in (5, 6, 7):
             out.append(c)
         else:
             raise TypeError(

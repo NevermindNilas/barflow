@@ -135,6 +135,42 @@ def alongside(*specs: Sequence[str], sep: str = "") -> list[str]:
     return frames
 
 
+# ---- Procedural built-ins (richer alive-progress-style motion) ----------
+
+def _wave(cells: int = 6, frames: int = 14, glyphs: str = "▁▂▃▄▅▆▇█") -> list[str]:
+    """A traveling sine wave `cells` wide over `frames` steps.
+
+    Each frame is a row of block-height glyphs sampled from a sine whose
+    phase advances with both time and column, so the crest sweeps sideways —
+    the undulating-water motion alive-progress's `waves` family is known for.
+    """
+    import math
+
+    n = len(glyphs)
+    out: list[str] = []
+    for t in range(frames):
+        row = []
+        for x in range(cells):
+            phase = (t / frames + x / cells) * 2.0 * math.pi
+            lvl = int((math.sin(phase) * 0.5 + 0.5) * (n - 1) + 0.5)
+            row.append(glyphs[lvl])
+        out.append("".join(row))
+    return out
+
+
+# Built from the DSL above, so these stay in sync with the same compositional
+# primitives users get for their own animations. All glyphs are single-cell,
+# so every frame of a given spinner has a constant display width.
+SPINNERS.update({
+    "wave":      _wave(6, 14),                          # undulating block wave
+    "wave_wide": _wave(10, 18),                         # wider, slower wave
+    "dots_wave": _wave(6, 12, glyphs="⠀⡀⡄⡆⡇⣇⣧⣷⣿"),  # braille fill wave
+    "bounce":    bouncing("●", length=7),              # ball in a track
+    "scan":      bouncing("▓█▓", length=9, pad="░"),   # blob sweep over a track
+    "flow":      scrolling("≡≡≡  ", length=6),         # pipes flowing rightward
+})
+
+
 __all__ = [
     "SPINNERS", "frame", "scrolling", "bouncing", "sequential", "alongside",
 ]

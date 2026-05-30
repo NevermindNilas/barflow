@@ -84,5 +84,15 @@ def test_invalid_specs_raise_value_error(spec):
         parse(spec)
 
 
+@pytest.mark.parametrize("bad", [[1, 2], object(), {"a": 1}])
+def test_non_str_spec_raises_attributeerror(bad):
+    # A truthy non-str spec hits `.startswith` in style() -> AttributeError.
+    # The lru_cache memoizing the parse core must NOT turn this into a
+    # TypeError (unhashable) by caching the whole function: the None/empty/
+    # raw-escape guards stay uncached so non-str inputs raise exactly as before.
+    with pytest.raises(AttributeError):
+        parse(bad)
+
+
 def test_module_exports():
     assert set(style.__all__) == {"style", "RESET"}

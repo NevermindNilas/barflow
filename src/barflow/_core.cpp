@@ -139,6 +139,14 @@ struct Column {
     std::string left_border;   // "|" by default
     std::string right_border;  // "|" by default
 
+    // Animated leading-edge frames for COL_BAR. When non-empty and the bar
+    // is incomplete, the boundary cell (the cell just past the filled run)
+    // cycles through these by frame_tick instead of showing a static
+    // partial glyph — the alive-progress-style "moving tip" that keeps the
+    // bar in motion even while the fill fraction is stalled. Empty vector =
+    // no tip (the static partial/round/empty edge, unchanged behavior).
+    std::vector<std::string> tip;
+
     // Precomputed row strings used by render_column(COL_BAR): `fill`
     // repeated `width` times and `empty_ch` repeated `width` times.
     // Populated by finalize_bar_cache() once width/glyphs are known,
@@ -734,7 +742,14 @@ void render_column(const Column& col, const Task& t,
                 for (int i = 0; i < full && i < bar_w; ++i) buf.append(col.fill);
             }
             if (full < bar_w) {
-                if (partial > 0 && !col.partials.empty()) {
+                if (!col.tip.empty() && ctx.frac < 1.0) {
+                    // Animated leading edge: cycle the tip frames by
+                    // frame_tick so the boundary cell moves every frame even
+                    // when the fill fraction is static. `frac < 1.0` guards
+                    // the complete bar (full == bar_w skips this block, so a
+                    // finished bar is a solid run with no dangling tip).
+                    buf.append(col.tip[ctx.frame_tick % col.tip.size()]);
+                } else if (partial > 0 && !col.partials.empty()) {
                     // Map 1..7 (partial level) onto 0..N-1 (partials index).
                     size_t idx = static_cast<size_t>(partial - 1)
                                  * col.partials.size() / 7;
@@ -1355,7 +1370,11 @@ void render_frame(ProgressState* st) {
             for (size_t ci = 0; ci < ncols; ++ci) {
                 if (!visible_cols[ci]) continue;
                 const Column& col = st->columns[ci];
-                bool always_dirty = (col.type == COL_SPINNER);
+                // Spinners animate every frame; a bar with an animated tip
+                // does too (its boundary cell cycles by frame_tick even when
+                // the fill is unchanged), so neither can be CUF-skipped.
+                bool always_dirty = (col.type == COL_SPINNER) ||
+                                    (col.type == COL_BAR && !col.tip.empty());
                 bool bytes_match  = (!always_dirty) &&
                                     positions_stable &&
                                     col_out[ci] == prev_out[ci];
@@ -1554,15 +1573,17 @@ int parse_columns(PyObject* columns_obj, std::vector<Column>& out) {
         PyObject* item = PySequence_Fast_GET_ITEM(columns_obj, i);
         // Accept: 5-tuple (type, text, width, frames, color)
         //     or  6-tuple (type, text, width, frames, color, bar_glyphs)
+        //     or  7-tuple (..., bar_glyphs, tip) — COL_BAR only; `tip` is
+        //         None | list/tuple of str (animated leading-edge frames)
         //     where bar_glyphs = None | (fill, empty, partials, left, right)
         if (!PyTuple_Check(item)) {
             PyErr_SetString(PyExc_TypeError, "each column must be a tuple");
             return -1;
         }
         Py_ssize_t tlen = PyTuple_GET_SIZE(item);
-        if (tlen != 5 && tlen != 6) {
+        if (tlen != 5 && tlen != 6 && tlen != 7) {
             PyErr_SetString(PyExc_TypeError,
-                "each column must be a 5- or 6-tuple");
+                "each column must be a 5-, 6-, or 7-tuple");
             return -1;
         }
         Column c;
@@ -1630,7 +1651,7 @@ int parse_columns(PyObject* columns_obj, std::vector<Column>& out) {
             }
             Py_INCREF(cb);
             c.py_callable.assign_new_ref(cb);
-        } else if (tlen == 6) {
+        } else if (tlen == 6 || tlen == 7) {
             PyObject* g = PyTuple_GET_ITEM(item, 5);
             if (g != Py_None) {
                 if (!PyTuple_Check(g) || PyTuple_GET_SIZE(g) != 5) {
@@ -1667,6 +1688,31 @@ int parse_columns(PyObject* columns_obj, std::vector<Column>& out) {
                 if (pull_str(PyTuple_GET_ITEM(g, 3), c.left_border) < 0) return -1;
                 if (pull_str(PyTuple_GET_ITEM(g, 4), c.right_border) < 0) return -1;
                 glyphs_from_user = true;
+            }
+        }
+
+        // 7-tuple slot 6: animated bar-tip frames. COL_BAR only; None or a
+        // list/tuple of single-cell strings cycled at the bar's leading edge.
+        if (tlen == 7) {
+            if (c.type != COL_BAR) {
+                PyErr_SetString(PyExc_TypeError,
+                    "only COL_BAR columns may carry a 7th (tip) element");
+                return -1;
+            }
+            PyObject* tp = PyTuple_GET_ITEM(item, 6);
+            if (tp != Py_None) {
+                if (!PyList_Check(tp) && !PyTuple_Check(tp)) {
+                    PyErr_SetString(PyExc_TypeError,
+                        "bar tip must be None or a list/tuple of str");
+                    return -1;
+                }
+                Py_ssize_t tn = PySequence_Fast_GET_SIZE(tp);
+                c.tip.reserve(static_cast<size_t>(tn));
+                for (Py_ssize_t j = 0; j < tn; ++j) {
+                    const char* s = PyUnicode_AsUTF8(PySequence_Fast_GET_ITEM(tp, j));
+                    if (!s) return -1;
+                    c.tip.emplace_back(s);
+                }
             }
         }
 
@@ -1919,14 +1965,13 @@ PyObject* Progress_update(PyProgress* self,
     if (nargs >= 2) {
         if (barflow_pylong_to_u64(args[1], &n) < 0) return nullptr;
     }
-    // Drop the GIL around render_mtx: render_frame holds the lock while a
-    // CallbackColumn re-enters Python, so a GIL-holding caller blocked here
-    // would deadlock. Defer the out-of-range error until the GIL is back.
+    // Resolve the task pointer under render_mtx (the render thread can
+    // reallocate `tasks` via add_task). Defer the out-of-range error until
+    // the GIL is back.
     Task* target = nullptr;
     bool  oob    = false;
     auto* st     = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
+    auto resolve = [&]() {
         std::lock_guard<std::mutex> lg(st->render_mtx);
         if (task_id < 0 ||
             static_cast<size_t>(task_id) >= st->tasks.size()) {
@@ -1934,8 +1979,24 @@ PyObject* Progress_update(PyProgress* self,
         } else {
             target = st->tasks[static_cast<size_t>(task_id)].get();
         }
+    };
+    // The GIL must be dropped before render_mtx ONLY when a CallbackColumn
+    // exists: render_frame holds render_mtx while re-entering Python via
+    // PyGILState_Ensure, so a GIL-holding waiter would deadlock against it.
+    // With no callback column the render thread (and every other render_mtx
+    // holder) never touches the GIL under the lock, so taking it with the
+    // GIL held cannot deadlock — and we skip the per-call thread-state
+    // save/restore on the multibar hot path. has_callback_col is set once in
+    // refresh_column_flags during single-threaded init (before the render
+    // thread starts) and columns are immutable afterward, so this read needs
+    // no synchronization.
+    if (st->has_callback_col) {
+        Py_BEGIN_ALLOW_THREADS
+        resolve();
+        Py_END_ALLOW_THREADS
+    } else {
+        resolve();
     }
-    Py_END_ALLOW_THREADS
     if (oob) {
         PyErr_SetString(PyExc_IndexError, "task_id out of range");
         return nullptr;

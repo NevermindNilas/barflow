@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`pacman` theme reworked + `pacman` bar glyphs.** The `pacman` theme is now a
+  Pac-Man munching a row of pellets — eaten path blank behind, `•` pellets
+  ahead, and a `ᗧ`→`●` chomping mouth (open wedge snapping shut) animated at the
+  leading edge via the bar-tip pipeline. (Replaces the former emoji-ball
+  `pacman`.)
+
 - **`Progress.render_line(task_id=0) -> str`.** Renders a task's configured
   columns into a string using the exact live-frame pipeline, but writes
   nothing to the console and has no frame-state side effects. Useful for
@@ -78,6 +84,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Multi-bar `update()` is ~2.5× faster.** `update(task_id, n)` resolves the
+  task pointer under `render_mtx`. It now drops the GIL before the lock *only
+  when a `CallbackColumn` is present* — that is the sole case where the render
+  thread re-enters Python under `render_mtx` (via `PyGILState_Ensure`) and a
+  GIL-holding waiter could deadlock. With no callback column it takes the lock
+  with the GIL held, skipping the per-call `Py_BEGIN/END_ALLOW_THREADS`
+  thread-state save/restore. `has_callback_col` is fixed during single-threaded
+  init (before the render thread starts) and columns are immutable after, so the
+  read needs no synchronization. Measured **67.4 → 26.4 ms per 1 M `update()`s
+  (14.8 → 37.7 M it/s)** on Windows / CPython 3.14, same-harness before/after
+  (`bench_multibar.py`); the win is larger on 3.14 because its GIL save/restore
+  is costlier. The cold setters (`set_total` / `set_description` /
+  `set_task_description` / `add_task`) keep the unconditional GIL drop — they are
+  not hot. Guarded by the new `tests/test_update_concurrency.py`, which hammers
+  `update()` + `add_task()` under a 1 ms render interval (watchdog-killed on
+  hang) for both the callback and no-callback paths and checks counter exactness.
+- **Themed / columned `Progress` construction is ~25% cheaper.**
+  `_progress.Progress.__init__`, `columns.BarColumn`, and `columns.SpinnerColumn`
+  now cache their lazy `from . import …` submodule lookups on first use instead
+  of re-running the import machinery (`_handle_fromlist` / `parent`) on every
+  call, and the `style.style()` SGR parser is memoized (`functools.lru_cache`,
+  bounded). Memoization wraps only the str-parsing core, so the exception
+  behaviour for empty / raw-escape / non-str / invalid specs is byte-for-byte
+  unchanged. Themed construction **6453 → 4768 ns**, columned (fresh factories)
+  **4783 → 3520 ns** (new `benchmarks/bench_construct.py`). Cold `import barflow`
+  is unaffected — the submodules are still loaded lazily on first use, never at
+  import, and `style` / `functools` stay off the `from barflow import track`
+  fast path.
 - Render loop is allocation-free per frame again: the per-task `visible_cols`
   and `this_cells` scratch vectors are hoisted into `ProgressState` (reused
   like the other frame buffers), and the delta-cache prime now swaps rather

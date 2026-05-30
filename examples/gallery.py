@@ -71,13 +71,13 @@ SECTIONS: dict[str, list[str]] = {
     ],
     "emoji": [
         "fire_emoji", "rocket", "sakura", "storm",
-        "sparkle", "pacman", "heart_emoji", "moon", "weather",
+        "sparkle", "heart_emoji", "moon", "weather",
     ],
     "brand": [
         "github_dark", "discord", "dracula", "solarized", "nord", "gruvbox",
     ],
     "playful": [
-        "hearts", "stars", "arrows", "pipes", "shade",
+        "hearts", "stars", "arrows", "pacman", "pipes", "shade",
         "line", "double", "round", "matrix",
         "fire", "ocean", "ice", "sunset", "forest",
     ],
@@ -102,6 +102,7 @@ def extract(cols):
         "bar_width": 30,
         "bar_ansi": "",
         "bar_glyphs": ("█", " ", [], "", ""),
+        "bar_tip": [],
         "spinner_frames": None,
         "spinner_ansi": "",
         "desc_ansi": "",
@@ -115,6 +116,8 @@ def extract(cols):
             out["bar_width"] = 30 if w is None or w < 0 else w
             out["bar_ansi"] = col[4] or ""
             out["bar_glyphs"] = col[5]
+            # 7th element (when present) is the animated leading-edge tip.
+            out["bar_tip"] = list(col[6]) if len(col) >= 7 else []
         elif kind == COL_SPINNER:
             out["spinner_frames"] = col[3]
             out["spinner_ansi"] = col[4] or ""
@@ -150,8 +153,11 @@ def plan_layout(all_parts, name_width, term_cols):
 
     for p in all_parts:
         fill, empty, partials, left, right = p["bar_glyphs"]
+        # The tip occupies the boundary cell, so its glyphs count toward the
+        # widest body glyph when sizing the body so a wide tip can't overflow.
         glyph_w = max([cell_width(fill) or 1, cell_width(empty) or 1]
-                      + [cell_width(x) for x in partials])
+                      + [cell_width(x) for x in partials]
+                      + [cell_width(x) for x in p.get("bar_tip", [])])
         border_w = cell_width(left) + cell_width(right)
         p["bar_width"] = max(1, (bar_display - border_w) // glyph_w)
 
@@ -188,26 +194,36 @@ def cell_width(s):
     return w
 
 
-def build_bar(glyphs, width, fraction):
-    """Build one bar string from a 5-tuple glyphs spec at given fill fraction."""
+def build_bar(glyphs, width, fraction, tip=(), tick=0):
+    """Build one bar string from a 5-tuple glyphs spec at given fill fraction.
+
+    When `tip` is non-empty and the bar is incomplete, the boundary cell
+    cycles through the tip frames by `tick` instead of showing a static
+    partial — mirroring the C core's animated leading edge so the wall looks
+    like a live `barflow.Progress(theme=...)`.
+    """
     fill, empty, partials, left, right = glyphs
     cells = max(1, width)
     levels = len(partials) + 1
     total = cells * levels
     filled = int(fraction * total + 0.5)
-    full_cells = filled // levels
-    partial_idx = filled % levels
+    full_cells = min(cells, filled // levels)
 
     body = fill * full_cells
     remaining = cells - full_cells
-    if partial_idx > 0 and remaining > 0:
-        body += partials[partial_idx - 1]
+    if tip and fraction < 1.0 and remaining > 0:
+        body += tip[tick % len(tip)]
         remaining -= 1
+    else:
+        partial_idx = filled % levels
+        if partial_idx > 0 and remaining > 0:
+            body += partials[partial_idx - 1]
+            remaining -= 1
     body += empty * remaining
     return f"{left}{body}{right}"
 
 
-def render_row(name, parts, fraction, name_width, bar_display):
+def render_row(name, parts, fraction, name_width, bar_display, tick=0):
     """Render a single preset row in a fixed grid that stacks vertically:
         [name (name_width)] [bar (bar_display)] [pct]
     Every row starts with the name (no per-theme spinner prefix, which made
@@ -217,7 +233,8 @@ def render_row(name, parts, fraction, name_width, bar_display):
     """
     name_label = f"\x1b[1;97m{name:<{name_width}}{RESET}"
 
-    bar_str = build_bar(parts["bar_glyphs"], parts["bar_width"], fraction)
+    bar_str = build_bar(parts["bar_glyphs"], parts["bar_width"], fraction,
+                        parts.get("bar_tip", ()), tick)
     bar_pad = " " * max(0, bar_display - cell_width(bar_str))
     bar_core = f"{parts['bar_ansi']}{bar_str}{RESET}" if parts["bar_ansi"] else bar_str
     bar_part = f"{bar_core}{bar_pad}"
@@ -256,7 +273,14 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
 
     rng = random.Random(seed)
     parts = {n: extract(themes.get(n)) for n in presets}
-    speeds = {n: rng.uniform(0.6, 1.6) for n in presets}  # finish-time multiplier
+    # Per-preset fill rate, normalized below against the slowest pick so the
+    # SLOWEST bar reaches 100% right at `total_frames` and faster ones finish
+    # earlier and hold. Without the normalization a bar's cumulative fill is
+    # speed*(frames/total_frames), so any speed < 1 ran out of frame budget
+    # and froze below 100% (a 0.6 bar topped out at ~70%) — the bars that
+    # "never complete".
+    rates = {n: rng.uniform(0.6, 1.6) for n in presets}
+    slowest = min(rates.values())
     fractions = {n: 0.0 for n in presets}
     name_width = max(len(n) for n in presets)
     n_rows = len(presets)
@@ -280,14 +304,22 @@ def run_gallery(presets, *, duration=6.0, fps=24, seed=None):
     drew_once = False
     t_start = time.perf_counter()
     try:
-        for frame in range(total_frames + fps):  # extra slack so all bars hit 100%
+        # Slowest bar finishes at total_frames; a little slack absorbs fp
+        # rounding. The all-complete check below ends the loop early once the
+        # last bar lands, so this is just an upper bound.
+        for frame in range(total_frames + max(2, fps // 2)):
             frame_start = time.perf_counter()
             for n in presets:
-                step = speeds[n] / total_frames
+                step = rates[n] / (slowest * total_frames)
                 fractions[n] = min(1.0, fractions[n] + step)
 
+            # Cycle the animated tip at ~12 Hz regardless of the frame rate, so
+            # the leading edge reads as motion instead of strobing at full fps
+            # (which on a slow bar looked like the fill jittering back/forth).
+            tip_tick = int(frame * 12 / fps)
             lines = [
-                render_row(n, parts[n], fractions[n], name_width, bar_display)
+                render_row(n, parts[n], fractions[n], name_width, bar_display,
+                           tip_tick)
                 for n in presets
             ]
 
@@ -329,9 +361,9 @@ def main():
     ap.add_argument("--only", nargs="+", default=None,
                     help="explicit preset list (overrides --section)")
     ap.add_argument("--duration", type=float, default=6.0,
-                    help="approximate seconds for fastest bar to finish (default 6)")
-    ap.add_argument("--fps", type=int, default=60,
-                    help="target frames per second (default 60)")
+                    help="approximate seconds for the LAST bar to finish (default 6)")
+    ap.add_argument("--fps", type=int, default=30,
+                    help="target frames per second (default 30)")
     ap.add_argument("--seed", type=int, default=None,
                     help="seed for per-preset speed randomness")
     ap.add_argument("--list", action="store_true",

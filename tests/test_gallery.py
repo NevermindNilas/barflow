@@ -84,3 +84,60 @@ def test_bar_display_caps_at_40_on_wide_terminal():
 def test_narrow_terminal_clamps_bar_display():
     _rows, bar_display = _render_rows("all", 50)
     assert bar_display < 40
+
+
+# ---- animated tip ----------------------------------------------------------
+
+def test_tipped_theme_extracts_tip_frames():
+    # matrix uses the braille glyph set, which carries a built-in tip.
+    parts = g.extract(themes.get("matrix"))
+    assert parts["bar_tip"], "expected matrix to carry an animated tip"
+
+
+def test_build_bar_tip_cycles_and_vanishes_at_full():
+    glyphs = ("#", "-", [], "[", "]")     # no partials → tip owns the edge
+    # Incomplete: boundary cell cycles the tip with `tick`.
+    assert g.build_bar(glyphs, 10, 0.5, ("a", "b"), 0) == "[#####a----]"
+    assert g.build_bar(glyphs, 10, 0.5, ("a", "b"), 1) == "[#####b----]"
+    # Complete: no boundary cell, so no dangling tip.
+    assert g.build_bar(glyphs, 10, 1.0, ("a", "b"), 0) == "[##########]"
+    # No tip → unchanged static edge.
+    assert g.build_bar(glyphs, 10, 0.5, (), 0) == "[#####-----]"
+
+
+def test_all_bars_reach_100_percent(monkeypatch):
+    # Regression: per-preset rates are normalized against the slowest pick so
+    # the slowest bar still completes within the frame budget. Previously a
+    # rate < 1 froze below 100%. Drive the real loop and check the final frame.
+    import io
+
+    buf = io.StringIO()
+    monkeypatch.setattr(g.sys, "stdout", buf)
+    presets = ["fire", "ocean", "matrix", "acid", "neon"]
+    g.run_gallery(presets, duration=0.3, fps=10, seed=1)
+
+    plain = ANSI.sub("", buf.getvalue())
+    rows = [ln for ln in plain.split("\n") if ln.strip()]
+    final = rows[-len(presets):]               # last frame = one row per preset
+    assert len(final) == len(presets)
+    for ln in final:
+        assert ln.rstrip().endswith("100%"), ln
+
+
+def test_rows_align_across_frame_ticks():
+    # The tip cycles by frame; a tip frame wider than the body glyph would
+    # ragged the grid. Sweep ticks × fills and demand one uniform width.
+    section, term = "all", 120
+    lineup = [n for n in g.SECTIONS[section] if n in themes.THEMES]
+    parts = {n: g.extract(themes.get(n)) for n in lineup}
+    name_width = max(len(n) for n in lineup)
+    bar_display = g.plan_layout(parts.values(), name_width, term)
+    widths = set()
+    for tick in range(8):
+        for frac in (0.2, 0.5, 0.8):
+            for n in lineup:
+                line = g.render_row(n, parts[n], frac, name_width,
+                                    bar_display, tick)
+                widths.add(g.cell_width(ANSI.sub("", line)))
+    assert len(widths) == 1, f"ragged across ticks: {sorted(widths)}"
+    assert max(widths) <= term
