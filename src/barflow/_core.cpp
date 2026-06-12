@@ -860,6 +860,13 @@ void render_column(const Column& col, const Task& t,
     }
 
     case COL_SPINNER: {
+        // Finished task: swap the animation for a completion check mark —
+        // the alive-progress-style "receipt". Only when the total is known
+        // (indeterminate tasks keep spinning until close).
+        if (t.total > 0 && t.last_snapshot >= t.total) {
+            buf.append("\xe2\x9c\x94");  // ✔
+            break;
+        }
         if (!col.frames.empty()) {
             buf.append(col.frames[ctx.frame_tick % col.frames.size()]);
         }
@@ -976,10 +983,27 @@ void install_default_columns(ProgressState* st) {
         c.color = std::move(color);
         if (c.type == COL_BAR) {
             default_glyphs::apply(c);
+            // Comet-tail tip pulsing into the empty track — keeps the
+            // default bar visibly alive even when progress stalls.
+            // Mirrors themes._SMOOTH_TIP; renders ✔-compatible with the
+            // leading spinner (both swap to static glyphs on completion).
+            c.tip = {"\xe2\x96\x91",   // ░
+                     "\xe2\x96\x92",   // ▒
+                     "\xe2\x96\x93",   // ▓
+                     "\xe2\x96\x88",   // █
+                     "\xe2\x96\x93",   // ▓
+                     "\xe2\x96\x92"};  // ▒
             finalize_bar_cache(c);
         }
         st->columns.push_back(std::move(c));
     };
+    // Braille spinner (→ ✔ on completion), bold cyan.
+    mk(COL_SPINNER, "", 0,
+       {"\xe2\xa0\x8b", "\xe2\xa0\x99", "\xe2\xa0\xb9", "\xe2\xa0\xb8",
+        "\xe2\xa0\xbc", "\xe2\xa0\xb4", "\xe2\xa0\xa6", "\xe2\xa0\xa7",
+        "\xe2\xa0\x87", "\xe2\xa0\x8f"},   // ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏
+       "\x1b[1;36m");
+    mk(COL_TEXT, " ");
     mk(COL_DESCRIPTION);
     mk(COL_TEXT, ": ");
     mk(COL_PERCENT);

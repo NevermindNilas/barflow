@@ -431,9 +431,11 @@ BAR_STYLES: dict[str, dict] = {
 # it back via `tip_for`. Each frame must match its style's cell width (1 cell
 # for these — emoji styles are intentionally left tip-less).
 #
-# Kept OUT of the registry literal (and off "smooth"/"ascii"/"equals") so the
-# default bar keeps its precise static 8-level fill and the byte-exact render
-# tests stay deterministic.
+# Kept OUT of the registry literal (and off "smooth"/"ascii"/"equals") so an
+# explicit `BarColumn(glyphs="smooth")` keeps its precise static 8-level fill
+# and explicit-column render tests stay deterministic. (The C core's built-in
+# default columns — used when no columns are passed at all — carry their own
+# copy of the smooth comet tip; see install_default_columns.)
 _TIPS: dict[str, list[str]] = {
     "blocks":  ["▒", "▓", "█", "▓"],                 # ▒▓█▓
     "shade":   ["░", "▒", "▓", "█", "▓", "▒"],  # ░▒▓█▓▒

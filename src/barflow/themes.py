@@ -36,6 +36,24 @@ _SMOOTH_TIP = ["░", "▒", "▓", "█", "▓", "▒"]
 # Utilitarian themes (minimal visual noise)
 # ---------------------------------------------------------------------------
 
+def alive():
+    """alive-progress classic: `desc |█████▊▒    | ▂▄▆ 42/100 [42%] in 3s (...)`.
+
+    Wave spinner trails the bar, comet tip keeps the edge moving, and the
+    leading spinner of the C core's *default* columns is not used — this is
+    the layout alive-progress ships out of the box, ported glyph-for-glyph.
+    """
+    return [
+        c.DescriptionColumn(style="bold"), " ",
+        c.BarColumn(width=35, style="bold #02a9f7", tip=_SMOOTH_TIP), " ",
+        c.SpinnerColumn(name="wave", style="bold #02a9f7"), " ",
+        c.CountColumn(style="bold"), " [",
+        c.PercentColumn(style="bold"), "] in ",
+        c.ElapsedColumn(), " (",
+        c.RateColumn(), ")",
+    ]
+
+
 def classic():
     """tqdm-style: desc, percent, bar, count, elapsed<eta, rate."""
     return [
@@ -808,6 +826,7 @@ def random_theme():
 
 THEMES = {
     # Utilitarian
+    "alive":        alive,
     "classic":      classic,
     "minimal":      minimal,
     "rich":         rich_like,
@@ -927,7 +946,8 @@ def names() -> list[str]:
 __all__ = [
     "THEMES", "get", "names",
     # Utilitarian
-    "classic", "minimal", "rich", "rich_like", "spinner", "mono", "ghost",
+    "alive", "classic", "minimal", "rich", "rich_like", "spinner", "mono",
+    "ghost",
     # ASCII / legacy
     "ascii", "equals", "brackets",
     # Colorful

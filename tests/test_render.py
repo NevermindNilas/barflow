@@ -162,6 +162,56 @@ def test_render_line_out_of_range_raises():
             p.render_line(5)
 
 
+# ---- spinner completion receipt ---------------------------------------------
+
+def test_spinner_renders_check_mark_when_task_finished():
+    p = barflow.Progress(C.SpinnerColumn(name="dots", style=""),
+                         total=4, disable=True)
+    p.__enter__()
+    try:
+        assert p.render_line() != "✔"   # still animating
+        p.advance(4)
+        assert p.render_line() == "✔"
+    finally:
+        p.close()
+
+
+def test_spinner_keeps_spinning_when_total_unknown():
+    # Indeterminate task: no total -> never "finished", no check mark.
+    p = barflow.Progress(C.SpinnerColumn(name="dots", style=""),
+                         total=0, disable=True)
+    p.__enter__()
+    try:
+        p.advance(100)
+        assert p.render_line() != "✔"
+    finally:
+        p.close()
+
+
+def test_default_columns_show_spinner_then_check_mark():
+    p = barflow.Progress(total=2, desc="job", disable=True)
+    p.__enter__()
+    try:
+        assert p.render_line(0, 200).startswith("⠋ job: ")
+        p.advance(2)
+        assert p.render_line(0, 200).startswith("✔ job: ")
+    finally:
+        p.close()
+
+
+def test_default_bar_has_animated_tip_at_boundary():
+    # 4/10 of a 40-cell bar = 16 full cells; the next cell is the comet
+    # tip (frame 0 = "░" since frame_tick never advances when disabled).
+    p = barflow.Progress(total=10, disable=True)
+    p.__enter__()
+    try:
+        p.advance(4)
+        line = p.render_line(0, 200)
+        assert "█" * 16 + "░" in line
+    finally:
+        p.close()
+
+
 # ---- every shipped theme renders -------------------------------------------
 
 def test_every_theme_renders_through_pipeline():

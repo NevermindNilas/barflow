@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Completion receipt (✔).** `SpinnerColumn` now renders a `✔` check mark
+  once its task finishes (`completed >= total`), alive-progress style.
+  Indeterminate tasks (no total) keep spinning until close. Applies to the
+  final frame on `close()` and to every finished row in a multibar.
+- **`alive` theme.** Ports alive-progress's classic layout:
+  `desc |█████▊▒⠀⠀⠀| ▂▄▆ 42/100 [42%] in 0:03 (...)` — comet-tip bar,
+  trailing wave spinner (→ `✔` on completion), count + percent + elapsed +
+  rate.
+
+### Changed
+
+- **Default columns got the alive treatment.** A bare `Progress(total=...)` /
+  `track(...)` now renders a leading bold-cyan braille spinner (`⠋⠙⠹…`,
+  swapping to `✔` when done) and an animated comet tail (`░▒▓█▓▒`) at the
+  bar's leading edge while incomplete. Layout is otherwise unchanged
+  (`desc: 42% |████▊░ …| 4/10 [el<eta, rate]`); explicit columns and themes
+  are unaffected.
+
 ## [0.4.0] — 2026-05-30
 
 ### Added
