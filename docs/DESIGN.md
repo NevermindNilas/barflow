@@ -1,6 +1,6 @@
 # BarFlow — Design Proposal
 
-**Goal.** A Python progress-bar library with a C++ core, Windows-first, that
+**Goal.** A Python progress-bar library with a C++ core, cross-platform, that
 beats `tqdm`, `rich.progress`, and `alive-progress` on three axes
 simultaneously: **import startup time**, **peak iterations/second**, and
 **per-iteration overhead** — without giving up the customization surface those

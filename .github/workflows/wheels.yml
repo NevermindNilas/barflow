@@ -27,6 +27,13 @@ jobs:
           - { os: windows-latest,   python: '314',  archs: AMD64,        label: win-cp314 }
           - { os: windows-latest,   python: '313t', archs: AMD64,        label: win-cp313t, free_threaded: true }
           - { os: windows-latest,   python: '314t', archs: AMD64,        label: win-cp314t, free_threaded: true }
+          # Windows ARM64 (native windows-11-arm runner; win_arm64 is CPython 3.11+)
+          - { os: windows-11-arm,   python: '311',  archs: ARM64,        label: win-cp311-arm64 }
+          - { os: windows-11-arm,   python: '312',  archs: ARM64,        label: win-cp312-arm64 }
+          - { os: windows-11-arm,   python: '313',  archs: ARM64,        label: win-cp313-arm64 }
+          - { os: windows-11-arm,   python: '314',  archs: ARM64,        label: win-cp314-arm64 }
+          - { os: windows-11-arm,   python: '313t', archs: ARM64,        label: win-cp313t-arm64, free_threaded: true }
+          - { os: windows-11-arm,   python: '314t', archs: ARM64,        label: win-cp314t-arm64, free_threaded: true }
           # macOS (universal: x86_64 + arm64)
           - { os: macos-latest,     python: '310',  archs: 'x86_64 arm64', label: mac-cp310 }
           - { os: macos-latest,     python: '311',  archs: 'x86_64 arm64', label: mac-cp311 }

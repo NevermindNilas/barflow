@@ -1,6 +1,6 @@
 # BarFlow
 
-**A fast Python progress bar library with a C++ core. Windows-first.**
+**A fast Python progress bar library with a C++ core. Cross-platform — first-class on Windows, macOS, and Linux.**
 Built to beat `tqdm`, `rich.progress`, and `alive-progress` on cold
 import, per-iteration overhead, peak it/s, memory footprint, tail
 latency, multi-bar throughput, and first-frame latency — simultaneously.
@@ -301,16 +301,33 @@ free-threaded `cp313t` / `cp314t` builds.
 - **Synchronous first frame.** `Progress.__enter__` paints one
   frame inline before the render thread takes over, so short-lived
   jobs don't see the 50 ms blank-bar window.
-- **Windows-first.** Unconditional `ENABLE_VIRTUAL_TERMINAL_PROCESSING`,
-  UTF-16 transcoded `WriteConsoleW` chunked at 32 KB, legacy-console
-  fallback. No `colorama` dependency. A reusable `wscratch`
-  transcoding buffer means steady-state frames are zero-alloc.
-- **Multi-task + columns.** 10 built-in column types
-  (description/bar/percent/count/rate/elapsed/eta/spinner/text — all in
-  C++ — plus a Python-rendered callback column), rich-style column API,
+- **Native console I/O on every OS.** Windows: unconditional
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING`, UTF-16 transcoded `WriteConsoleW`
+  chunked at 32 KB, legacy-console fallback, no `colorama` dependency, and a
+  reusable `wscratch` transcoding buffer so steady-state frames are zero-alloc.
+  POSIX (macOS/Linux): native ANSI `write(2)` to fd 2 with `TIOCGWINSZ` width
+  detection. Same rendering core behind a thin platform shim.
+- **Multi-task + columns.** 11 built-in column types
+  (description/bar/percent/count/rate/elapsed/eta/spinner/text/postfix — all
+  in C++ — plus a Python-rendered callback column), rich-style column API,
   themes, ANSI cursor stacking for nested bars.
   `Progress.set_description(str)` and `set_task_description(task_id, str)`
   expose metadata churn without touching the lock-free hot path.
+- **tqdm-shaped ergonomics.** `reset(task_id, total)` restarts a bar for
+  reuse across phases; `set_postfix(loss=…, acc=…)` adds a live trailing
+  annotation (the default layout carries it invisibly until set);
+  `unit="B", unit_scale=True, unit_divisor=1024` humanizes counts/rate for
+  byte transfers (`1.50M/4.10M`, `… B/s`); `smoothing=0.3` swaps the
+  whole-run average rate for an EMA that tracks current speed; `leave=False`
+  clears the bar on completion. `Progress.total` / `.elapsed` read task 0,
+  and `list(track(range(n)))` preallocates via `__length_hint__`.
+- **More tqdm/rich parity.** `barflow.wrap_file(fileobj, total=…)` /
+  `wrapattr` meter a stream's byte throughput (read/write) through a
+  transparent proxy; `initial=` resumes a partially-done job (shown but
+  excluded from the rate); `set_visible(task_id, bool)` hides/shows a task's
+  row while it keeps counting; `delay=` suppresses the bar until it has run
+  longer than N seconds; `disable=None` auto-disables when stderr is not a
+  TTY (so piped/redirected runs stay clean).
 - **Spinner DSL.** Compositional factories
   (`frame` / `scrolling` / `bouncing` / `alongside` / `sequential`)
   compile to precomputed frame tables at `__enter__`.
@@ -375,6 +392,23 @@ with barflow.Progress(total=100, capture_output=True) as p:
         if i % 10 == 0:
             print(f"checkpoint {i}")   # appears above the bar
         p.tick()
+
+# Byte transfer — humanized count/rate, EMA-smoothed speed
+with barflow.Progress(total=4_100 * 1024, desc="download.iso",
+                      unit="B", unit_scale=True, unit_divisor=1024,
+                      smoothing=0.3) as p:
+    while not done:
+        chunk = recv()
+        p.advance(len(chunk))       # renders 1.50M/4.10M … 3.2M B/s
+
+# Training loop — reuse one bar across epochs, live metrics
+with barflow.Progress(total=steps, smoothing=0.4) as p:
+    for epoch in range(epochs):
+        p.reset(total=steps)                       # restart counter + timers
+        p.set_description(f"epoch {epoch}")
+        for step in range(steps):
+            p.advance(1)
+            p.set_postfix(loss=loss, acc=acc)      # … loss=0.031, acc=0.98
 
 # asyncio
 import asyncio, barflow.aio as aio

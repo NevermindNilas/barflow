@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`reset(task_id=0, total=None)`.** Restart a task in place — counter back to
+  0, elapsed/rate/eta re-based to now, completion freeze and rate history
+  cleared, optionally a new total installed — so a `Progress` can be reused
+  across phases without reconstructing it (tqdm-parity).
+- **Postfix annotations (`set_postfix` / `set_postfix_str` / `PostfixColumn`).**
+  A tqdm-style trailing `key=value` field: `p.set_postfix(loss=0.031, acc=0.98)`
+  renders `… loss=0.031, acc=0.98` after the bar (floats shown to 3 significant
+  figures). The default column set carries an invisible postfix column, so it
+  works with no custom layout; `PostfixColumn()` places it explicitly.
+- **Unit humanization (`unit` / `unit_scale` / `unit_divisor`).** Byte-transfer
+  bars: `unit="B", unit_scale=True` renders counts as `1.50M/4.10M` and the
+  rate as `3.21M B/s`; `unit_divisor=1024` switches to binary scaling. `unit`
+  alone sets the rate noun (`… N B/s`).
+- **Smoothed rate (`smoothing=`).** `0` keeps the whole-run average (default,
+  unchanged); `(0,1]` reports an exponential moving average of the most recent
+  interval's it/s, so a bursty or stalled producer shows a responsive rate and
+  ETA. Applies to `Progress`, `track`, and `atrack`.
+- **`leave=False`.** Clears the bar area on close instead of leaving the final
+  frame + newline — ephemeral bars.
+- **`Progress.total` / `Progress.elapsed` getters** (task 0). `total` is `None`
+  when unbounded; `elapsed` freezes at completion.
+- **`Tracker.__length_hint__`.** `list(track(range(n)))` and other consumers can
+  preallocate; reports remaining items (`0` when unbounded).
+- **File-object wrapping (`barflow.wrap_file` / `wrapattr`).** Wrap a binary
+  stream so every `read`/`write` (also `read1`/`readline`/`readinto`) advances a
+  byte-scaled bar; `total` is inferred from `os.fstat` when omitted. Transparent
+  proxy — unknown attributes pass through. Mirrors `tqdm.wrapattr` /
+  `rich.Progress.wrap_file`.
+- **`initial=`.** Resume a partially-done job: the count starts seeded and is
+  shown, but rate/eta measure only the work done in this run (tqdm-parity).
+- **`set_visible(task_id, visible)`.** Hide or show a task's row while it keeps
+  counting — rich's `update(visible=)`.
+- **`delay=`.** Suppress the bar until N seconds have elapsed since `__enter__`,
+  so a job that finishes quickly never flashes one (tqdm/rich `delay=`). A bar
+  that never crosses the window emits nothing on close.
+- **`disable=None`.** Auto-disables when stderr is not a TTY (tqdm's
+  `disable=None`), so redirected/piped runs don't spray ANSI frames into the
+  sink. Default stays `False` (always show).
+- **`align=True`.** Right-pads every task's description to the widest one so
+  the bar (and everything after it) starts at the same column on every row —
+  rich's `Table.grid` alignment, without a table.
+- **Finished-task freeze.** A completed task's `elapsed`/rate/eta freeze at the
+  moment it reached `total` instead of decaying every frame while other tasks
+  keep the render thread alive; re-extending the total past `completed`
+  (`set_total`) un-freezes it.
+
+### Fixed
+
+- **Render-thread busy-spin.** A non-positive `min_interval` made
+  `render_cv.wait_for(0s)` return immediately every wakeup, pinning a core at
+  100%. It is now floored at 1 ms.
+- **Clock-period assumption.** `now_ns()` used `steady_clock::…count()` directly,
+  which is only nanoseconds by convention on the shipped toolchains; it now
+  `duration_cast`s to nanoseconds so the timing is correct on any conforming
+  clock period (no measurable cost).
+
 ## [0.4.1] — 2026-06-12
 
 ### Added

@@ -22,6 +22,7 @@ from __future__ import annotations
 from ._core import (
     COL_TEXT, COL_DESCRIPTION, COL_BAR, COL_PERCENT, COL_COUNT,
     COL_RATE, COL_ELAPSED, COL_ETA, COL_SPINNER, COL_CALLBACK,
+    COL_POSTFIX,
 )
 from .style import style as _style
 
@@ -142,6 +143,16 @@ def SpinnerColumn(frames=None, *, name="dots", style=None, color=None):
     return (COL_SPINNER, "", 0, list(frames), _resolve(style, color))
 
 
+def PostfixColumn(*, style=None, color=None):
+    """The task's postfix string (set via `Progress.set_postfix(**fields)` or
+    `set_postfix_str(task_id, text)`). Renders nothing until a postfix is set,
+    and self-prefixes a single space so it can trail other columns cleanly —
+    the default column set already ends with one, so `set_postfix` works out
+    of the box without composing a custom layout.
+    """
+    return (COL_POSTFIX, "", 0, None, _resolve(style, color))
+
+
 def CallbackColumn(func, *, style=None, color=None):
     """Python-rendered column. `func(task)` is called on every frame
     from the render thread with a `types.SimpleNamespace` snapshot of
@@ -184,5 +195,5 @@ def resolve_columns(columns):
 __all__ = [
     "TextColumn", "DescriptionColumn", "BarColumn", "PercentColumn",
     "CountColumn", "RateColumn", "ElapsedColumn", "EtaColumn",
-    "SpinnerColumn", "CallbackColumn", "resolve_columns",
+    "SpinnerColumn", "PostfixColumn", "CallbackColumn", "resolve_columns",
 ]

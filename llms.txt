@@ -1,6 +1,6 @@
 # BarFlow
 
-> Fast Python progress-bar library with a C++ core. Windows-first.
+> Fast Python progress-bar library with a C++ core. Cross-platform: Windows, macOS, Linux.
 > `barflow.track()` wraps an iterable in a live bar whose hot path is a
 > single atomic `fetch_add` in C++ plus the CPython call trampoline. A
 > background render thread owns all formatting and I/O, so the producer

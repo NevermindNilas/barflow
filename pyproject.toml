@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "barflow"
 version = "0.4.1"
-description = "Fast Python progress bars with a C++ core. Windows-first."
+description = "Fast Python progress bars with a C++ core. Cross-platform: Windows, macOS, Linux."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -15,7 +15,8 @@ authors = [
 ]
 keywords = [
     "progress", "progressbar", "progress-bar", "tqdm", "rich", "cli",
-    "terminal", "spinner", "cpp", "c-extension", "windows",
+    "terminal", "spinner", "cpp", "c-extension",
+    "cross-platform", "windows", "macos", "linux",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

@@ -77,6 +77,7 @@ enum ColumnType : int {
     COL_ETA         = 7,
     COL_SPINNER     = 8,
     COL_CALLBACK    = 9,
+    COL_POSTFIX     = 10,
 };
 
 // Move-only PyObject* owner. Columns hold user-supplied callables for
@@ -217,11 +218,49 @@ struct Task {
     // Aligned to its own 64B block to avoid false sharing with `completed`.
     alignas(kCacheLine) uint64_t    total{0};
     uint64_t    start_time_ns{0};
+    // Wall-clock at which the task first reached `total`. 0 while running.
+    // Once set, elapsed/rate/eta are computed against this frozen instant
+    // instead of `now`, so a finished bar shows its final time + average
+    // rate rather than a rate that decays every frame while other tasks
+    // keep the render thread alive. Reset to 0 if `total` is later raised
+    // above `completed` (set_total re-extend), un-freezing the clock.
+    uint64_t    finish_time_ns{0};
     std::string description;
+    std::string postfix;            // set_postfix_str; rendered by COL_POSTFIX
     uint64_t    last_snapshot{0};
+    // Count the task started at (tqdm `initial=`, for resuming partial work).
+    // The bar shows `completed` (which includes this), but rate/eta measure
+    // only the work done in THIS run, i.e. against `completed - initial`, so
+    // a resume doesn't report a rate inflated by the pre-seeded count.
+    uint64_t    initial{0};
     int         id{0};
     bool        visible{true};
+
+    // --- EMA smoothed-rate state (only touched when smoothing > 0) ---
+    // Exponential moving average of the instantaneous it/s, blended each
+    // frame so a bursty/stalled producer shows a rate that tracks recent
+    // speed instead of the whole-run average. `ema_primed` guards the first
+    // sample (seeded from the average). Reset by reset().
+    double      ema_rate{0.0};
+    uint64_t    ema_last_completed{0};
+    uint64_t    ema_last_ns{0};
+    bool        ema_primed{false};
 };
+
+// Effective render clock for a task: frozen at completion time so a done
+// bar's elapsed/rate/eta stop moving. `completed` is the value already
+// loaded by the caller; `now_ns_` is the current wall clock. Mutates
+// task.finish_time_ns (caller must hold render_mtx). Returns the ns instant
+// to measure elapsed against.
+static inline uint64_t task_clock_ns(Task& task, uint64_t completed,
+                                     uint64_t now_ns_) {
+    if (task.total > 0 && completed >= task.total) {
+        if (task.finish_time_ns == 0) task.finish_time_ns = now_ns_;
+        return task.finish_time_ns;
+    }
+    task.finish_time_ns = 0;   // running (or re-extended past completed)
+    return now_ns_;
+}
 
 struct ProgressState {
     // tasks/columns mutation requires render_mtx. Reads from the render
@@ -266,6 +305,31 @@ struct ProgressState {
     bool   is_console{false};
     bool   closed{false};
 
+    // Rate smoothing: 0 = whole-run average (default, unchanged behavior);
+    // (0,1] = EMA weight on the most recent interval's instantaneous rate.
+    double smoothing{0.0};
+    // leave=false erases the bar area on close instead of leaving the final
+    // frame + newline on screen (ephemeral bars). Default true.
+    bool   leave{true};
+    // Unit humanization for COL_COUNT / COL_RATE. `unit` is the noun in the
+    // rate suffix ("it" -> "N it/s"); unit_scale humanizes counts/rates with
+    // SI-style k/M/G scaling by unit_divisor (1000 SI, 1024 binary).
+    std::string unit{"it"};
+    bool        unit_scale{false};
+    double      unit_divisor{1000.0};
+    // When true, COL_DESCRIPTION is right-padded to the widest description
+    // across all tasks so bars align vertically (rich Table.grid behavior).
+    bool   align_columns{false};
+
+    // delay: suppress all rendering until this many seconds have elapsed
+    // since __enter__ (tqdm/rich `delay=`), so a job that finishes quickly
+    // never flashes a bar. `enter_ns` stamps the __enter__ instant; `shown`
+    // latches once the first frame is actually painted — a bar that never
+    // showed emits no final frame or trailing newline on close.
+    double   delay{0.0};
+    uint64_t enter_ns{0};
+    bool     shown{false};
+
     int      last_rendered_lines{0};
     uint64_t frame_tick{0};
 
@@ -287,6 +351,10 @@ struct ProgressState {
     // loop allocation-free after the first frame. Refilled per task.
     std::vector<char> visible_cols_cache;
     std::vector<int>  this_cells_cache;
+    // Alignment: per-column max cell width across visible tasks (align mode),
+    // plus a scratch buffer the measurement pre-pass renders into.
+    std::vector<int>  col_align_cache;
+    std::string       align_scratch;
 
     // --- Delta-render (diff-based frame output) cache ---
     // Previous-frame per-(task, column) rendered bytes and their visible
@@ -323,8 +391,14 @@ struct ProgressState {
 };
 
 inline uint64_t now_ns() {
+    // duration_cast<nanoseconds> rather than raw .count(): steady_clock's
+    // period is nanoseconds on the three shipped toolchains (MSVC, libstdc++,
+    // libc++) but that is not guaranteed by the standard. The cast makes the
+    // conversion correct on any conforming clock period at no measurable cost
+    // (it folds to identity when the period already is nano).
     return static_cast<uint64_t>(
-        std::chrono::steady_clock::now().time_since_epoch().count());
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 // -------- Console init / write primitives --------
@@ -450,6 +524,32 @@ void format_rate(std::string& out, double rate) {
     out.append(tmp, static_cast<size_t>(n));
 }
 
+// Humanize a magnitude with SI/binary scaling driven by `divisor`:
+//   1500  (div 1000) -> "1.50k"      1048576 (div 1024) -> "1.00M"
+//   950              -> "950"        3.2e6              -> "3.20M"
+// Significant-figure width shrinks as the mantissa grows so the field stays
+// ~4-5 cells wide. Used by COL_COUNT / COL_RATE when unit_scale is on.
+void format_scaled(std::string& out, double v, double divisor) {
+    static const char* kSuffix[] = {"", "k", "M", "G", "T", "P", "E"};
+    if (v < 0 || v != v) v = 0;
+    if (divisor < 2.0) divisor = 1000.0;
+    int i = 0;
+    while (v >= divisor && i < 6) { v /= divisor; ++i; }
+    char tmp[40];
+    int n;
+    if (i == 0) {
+        // Sub-divisor magnitudes are whole counts — no decimals.
+        n = std::snprintf(tmp, sizeof(tmp), "%.0f", v);
+    } else if (v >= 100.0) {
+        n = std::snprintf(tmp, sizeof(tmp), "%.0f%s", v, kSuffix[i]);
+    } else if (v >= 10.0) {
+        n = std::snprintf(tmp, sizeof(tmp), "%.1f%s", v, kSuffix[i]);
+    } else {
+        n = std::snprintf(tmp, sizeof(tmp), "%.2f%s", v, kSuffix[i]);
+    }
+    out.append(tmp, static_cast<size_t>(n));
+}
+
 void format_seconds(std::string& out, double s) {
     if (s < 0 || s != s) s = 0;
     uint64_t total = static_cast<uint64_t>(s);
@@ -509,6 +609,18 @@ struct RenderCtx {
     // this body width for flex bars (computed after measuring non-bar
     // columns against the terminal width).
     int       bar_width_override;
+    // Alignment: when >0, COL_DESCRIPTION right-pads with spaces to this
+    // many display cells (the widest description across all tasks this
+    // frame), so every bar starts at the same column. 0 = no padding.
+    int       desc_pad_to;
+    // Unit humanization, copied from ProgressState each frame so
+    // render_column (which holds no ProgressState handle) can format
+    // COL_RATE / COL_COUNT. `unit`/`unit_len` point into st->unit, which
+    // outlives the frame.
+    const char* unit;
+    size_t      unit_len;
+    bool        unit_scale;
+    double      unit_divisor;
 };
 
 // Decode one UTF-8 sequence starting at data[i] (n = total length). Sets
@@ -711,6 +823,10 @@ void render_column(const Column& col, const Task& t,
 
     case COL_DESCRIPTION:
         buf.append(t.description);
+        if (ctx.desc_pad_to > 0) {
+            int cells = count_display_cells(t.description);
+            for (int i = cells; i < ctx.desc_pad_to; ++i) buf.push_back(' ');
+        }
         break;
 
     case COL_BAR: {
@@ -833,17 +949,31 @@ void render_column(const Column& col, const Task& t,
         // `completed` getter are deliberately left unclamped.
         uint64_t shown = (t.total > 0 && t.last_snapshot > t.total)
                              ? t.total : t.last_snapshot;
-        format_number(buf, shown);
-        if (t.total > 0) {
-            buf.push_back('/');
-            format_number(buf, t.total);
+        if (ctx.unit_scale) {
+            format_scaled(buf, static_cast<double>(shown), ctx.unit_divisor);
+            if (t.total > 0) {
+                buf.push_back('/');
+                format_scaled(buf, static_cast<double>(t.total), ctx.unit_divisor);
+            }
+        } else {
+            format_number(buf, shown);
+            if (t.total > 0) {
+                buf.push_back('/');
+                format_number(buf, t.total);
+            }
         }
         break;
     }
 
     case COL_RATE:
-        format_rate(buf, ctx.rate);
-        buf.append(" it/s", 5);
+        // unit_scale humanizes with the configured divisor (bytes: 1024);
+        // otherwise the default k/M scaling. The noun comes from `unit`
+        // ("it" by default → " it/s", "B" → " B/s").
+        if (ctx.unit_scale) format_scaled(buf, ctx.rate, ctx.unit_divisor);
+        else                format_rate(buf, ctx.rate);
+        buf.push_back(' ');
+        buf.append(ctx.unit, ctx.unit_len);
+        buf.append("/s", 2);
         break;
 
     case COL_ELAPSED:
@@ -872,6 +1002,17 @@ void render_column(const Column& col, const Task& t,
         }
         break;
     }
+
+    case COL_POSTFIX:
+        // User-supplied trailing annotation (set_postfix). Self-prefixes a
+        // single space when non-empty so the default column set can carry a
+        // postfix column that stays invisible until something is set —
+        // no trailing separator on an empty postfix.
+        if (!t.postfix.empty()) {
+            buf.push_back(' ');
+            buf.append(t.postfix);
+        }
+        break;
 
     case COL_CALLBACK: {
         // GIL must already be held by the caller (render_frame batches
@@ -1018,6 +1159,10 @@ void install_default_columns(ProgressState* st) {
     mk(COL_TEXT, ", ");
     mk(COL_RATE);
     mk(COL_TEXT, "]");
+    // Trailing postfix column: invisible until set_postfix() puts something
+    // in it (COL_POSTFIX self-prefixes its own space), so the default bar
+    // gains tqdm-style postfix support with no change to its resting look.
+    mk(COL_POSTFIX);
 }
 
 // -------- Frame / render loop --------
@@ -1040,6 +1185,44 @@ static inline void append_cursor_right(std::string& buf, int n) {
 // only 3 bytes actively costs us bandwidth. 6 bytes is a safe floor
 // — we only skip when we are confident it is a net win.
 static constexpr int kDeltaMinSkipCells = 6;
+
+// Effective it/s for a task. With smoothing == 0 this is the whole-run
+// average (completed / elapsed) — unchanged default behavior. With
+// smoothing in (0,1] it is an exponential moving average of the most
+// recent interval's instantaneous rate, so a bursty or stalled producer
+// reports a rate (and ETA) that tracks current speed. Mutates the task's
+// EMA state; caller must hold render_mtx and pass the same `clock`
+// task_clock_ns returned (frozen at completion so a done bar's rate stops
+// moving — dt becomes 0 and the last EMA value is held).
+static inline double compute_rate(ProgressState* st, Task& task,
+                                  uint64_t completed, uint64_t clock,
+                                  double elapsed) {
+    // Measure only the work done in this run: subtract the resume offset so a
+    // bar started at `initial` doesn't report a rate inflated by pre-done work.
+    uint64_t done = completed > task.initial ? completed - task.initial : 0;
+    double avg = elapsed > 0.0 ? static_cast<double>(done) / elapsed : 0.0;
+    if (st->smoothing <= 0.0) return avg;
+
+    // Reprime on first sample or after a reset()/backwards jump (completed
+    // decreased): seed the EMA from the running average so it starts sane.
+    if (!task.ema_primed || completed < task.ema_last_completed) {
+        task.ema_primed        = true;
+        task.ema_last_completed = completed;
+        task.ema_last_ns        = clock;
+        task.ema_rate           = avg;
+        return avg;
+    }
+    uint64_t dn = completed - task.ema_last_completed;
+    double   dt = static_cast<double>(clock - task.ema_last_ns) / 1e9;
+    if (dt > 0.0) {
+        double inst = static_cast<double>(dn) / dt;
+        double a    = st->smoothing;
+        task.ema_rate = a * inst + (1.0 - a) * task.ema_rate;
+        task.ema_last_completed = completed;
+        task.ema_last_ns        = clock;
+    }
+    return task.ema_rate;
+}
 
 void render_frame(ProgressState* st) {
     if (st->tasks.empty() || st->columns.empty()) return;
@@ -1184,6 +1367,20 @@ void render_frame(ProgressState* st) {
         if (st->prev_visible_mask[ti].size() != ncols) st->prev_visible_mask[ti].assign(ncols, 0);
     }
 
+    // Alignment pre-pass: the widest visible description in cells. Every
+    // COL_DESCRIPTION then right-pads to this so bars line up vertically.
+    // Only walked when alignment is on and a description column exists;
+    // counting a handful of short strings per frame is negligible next to
+    // the render itself (which is already min_interval-gated).
+    int desc_pad = 0;
+    if (st->align_columns) {
+        for (auto& task : st->tasks) {
+            if (!task->visible) continue;
+            int c = count_display_cells(task->description);
+            if (c > desc_pad) desc_pad = c;
+        }
+    }
+
     int visible = 0;
     uint64_t tns = now_ns();
     size_t task_index_in_state = SIZE_MAX;
@@ -1206,14 +1403,20 @@ void render_frame(ProgressState* st) {
 
         RenderCtx ctx;
         ctx.vt_enabled = st->vt_enabled;
-        ctx.elapsed = static_cast<double>(tns - task->start_time_ns) / 1e9;
-        ctx.rate = ctx.elapsed > 0 ? static_cast<double>(completed) / ctx.elapsed : 0.0;
+        uint64_t clock = task_clock_ns(*task, completed, tns);
+        ctx.elapsed = static_cast<double>(clock - task->start_time_ns) / 1e9;
+        ctx.rate = compute_rate(st, *task, completed, clock, ctx.elapsed);
         ctx.frac = task->total > 0
             ? std::min(1.0, static_cast<double>(completed) / static_cast<double>(task->total))
             : -1.0;
         ctx.frame_tick = st->frame_tick;
+        ctx.unit         = st->unit.c_str();
+        ctx.unit_len     = st->unit.size();
+        ctx.unit_scale   = st->unit_scale;
+        ctx.unit_divisor = st->unit_divisor;
         ctx.snapshot = has_callback ? build_task_snapshot(*task, ctx) : nullptr;
         ctx.bar_width_override = -1;
+        ctx.desc_pad_to = desc_pad;
 
         // Visibility mask for this task's columns in THIS frame. The
         // flex path may zero entries; the non-flex path leaves them all
@@ -1548,6 +1751,17 @@ void render_loop(ProgressState* st) {
         // the external writer owns the screen meanwhile.
         if (st->paused.load(std::memory_order_acquire)) continue;
 
+        // delay=: keep the terminal untouched until the window elapses, so a
+        // job that finishes quickly never flashes a bar. Once elapsed, latch
+        // `shown` (the close path uses it to decide whether to emit a final
+        // frame) and force the first delayed frame to paint immediately.
+        if (st->delay > 0.0 && !st->shown) {
+            uint64_t waited = now_ns() - st->enter_ns;
+            if (waited < static_cast<uint64_t>(st->delay * 1e9)) continue;
+            st->shown        = true;
+            st->force_render = true;
+        }
+
         // Render unconditionally if there is a spinner (it animates even
         // with no producer progress) or if a resume forced a repaint;
         // otherwise only if counters moved. The spinner flag is cached at
@@ -1571,9 +1785,44 @@ void render_loop(ProgressState* st) {
     // the bar area and handed the screen to an external writer — emitting a
     // frame here would repaint the bar on top of that output, violating the
     // pause() contract. So skip it (and its trailing newline) while paused.
-    if (!st->paused.load(std::memory_order_acquire)) {
-        render_frame(st);
-        if (st->vt_enabled || st->is_console) write_bytes(st, "\n", 1);
+    // A delayed bar whose window never elapsed was never painted — emit
+    // nothing on close (no frame, no newline, no erase), as if disabled.
+    bool never_shown = (st->delay > 0.0 && !st->shown);
+    if (!never_shown && !st->paused.load(std::memory_order_acquire)) {
+        if (st->leave) {
+            render_frame(st);
+            if (st->vt_enabled || st->is_console) write_bytes(st, "\n", 1);
+        } else {
+            // leave=false: ephemeral bar. Erase the bar area the loop last
+            // painted (walk up its physical rows at the current width, clear
+            // to end of screen) leaving the cursor at column 0 — nothing
+            // lingers. No final render_frame: repainting just to wipe it would
+            // flicker, and last_task_cells already describes what's on screen
+            // (primed by __enter__'s synchronous first frame at minimum).
+            if (st->vt_enabled && !st->last_task_cells.empty()) {
+                std::string& buf = st->scratch;
+                buf.clear();
+                int term_w = query_terminal_width(st);
+                int total_rows = 0;
+                for (int c : st->last_task_cells) {
+                    int r = (term_w > 0) ? ((c + term_w - 1) / term_w) : 1;
+                    if (r < 1) r = 1;
+                    total_rows += r;
+                }
+                if (total_rows > 1) {
+                    buf.append("\x1b[", 2);
+                    char tmp[20];
+                    size_t n = u64_to_chars(
+                        tmp, static_cast<uint64_t>(total_rows - 1));
+                    buf.append(tmp, n);
+                    buf.push_back('A');
+                }
+                buf.push_back('\r');
+                buf.append("\x1b[J", 3);   // erase from cursor to end of screen
+                write_bytes(st, buf.data(), buf.size());
+                st->last_task_cells.clear();
+            }
+        }
     }
 }
 
@@ -1775,17 +2024,51 @@ int Progress_init(PyProgress* self, PyObject* args, PyObject* kwds) {
     const char* desc = nullptr;
     double min_interval = 0.05;
     int disable = 0;
+    int align = 0;
+    double smoothing = 0.0;
+    int leave = 1;
+    const char* unit = nullptr;
+    int unit_scale = 0;
+    double unit_divisor = 1000.0;
+    long long initial = 0;
+    double delay = 0.0;
 
     static const char* kwlist[] = {
-        "total", "desc", "min_interval", "disable", "columns", nullptr
+        "total", "desc", "min_interval", "disable", "columns", "align",
+        "smoothing", "leave", "unit", "unit_scale", "unit_divisor",
+        "initial", "delay", nullptr
     };
+    // `initial` is parsed signed (L) so a negative value is rejected rather
+    // than mask-wrapped to ~1.8e19 (as the unsigned K converter would).
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwds, "|OzdpO", const_cast<char**>(kwlist),
-            &total_obj, &desc, &min_interval, &disable, &columns_obj)) {
+            args, kwds, "|OzdpOpdpzpdLd", const_cast<char**>(kwlist),
+            &total_obj, &desc, &min_interval, &disable, &columns_obj, &align,
+            &smoothing, &leave, &unit, &unit_scale, &unit_divisor,
+            &initial, &delay)) {
         return -1;
     }
+    if (initial < 0) {
+        PyErr_SetString(PyExc_ValueError, "initial must be >= 0");
+        return -1;
+    }
+    // Guard the render-thread busy-spin: a non-positive interval makes
+    // render_cv.wait_for(0s) return immediately every wakeup, pinning a core
+    // at 100%. Floor at 1ms (1000 fps), well below any perceptible cost.
+    if (min_interval <= 0.0) min_interval = 0.001;
     self->state->min_interval = min_interval;
     self->state->disable = (disable != 0);
+    self->state->align_columns = (align != 0);
+    // Rate smoothing is a fraction in (0,1]; clamp out-of-range values so a
+    // stray >1 can't make the EMA overshoot or a negative disable it oddly.
+    if (smoothing < 0.0) smoothing = 0.0;
+    if (smoothing > 1.0) smoothing = 1.0;
+    self->state->smoothing = smoothing;
+    self->state->leave = (leave != 0);
+    if (unit && *unit) self->state->unit = unit;
+    self->state->unit_scale = (unit_scale != 0);
+    // A divisor < 2 would never scale (or would loop); fall back to SI 1000.
+    self->state->unit_divisor = unit_divisor >= 2.0 ? unit_divisor : 1000.0;
+    self->state->delay = delay > 0.0 ? delay : 0.0;
 
     init_console(self->state);
 
@@ -1801,6 +2084,16 @@ int Progress_init(PyProgress* self, PyObject* args, PyObject* kwds) {
         task->start_time_ns = now_ns();
         if (desc) task->description = desc;
         task->id = 0;
+        // Resume support (tqdm `initial=`): seed the counter and remember the
+        // offset so rate/eta measure only this run's work (compute_rate and
+        // render_line subtract `initial`). Clamp to total when known so a
+        // bogus initial > total can't render "N/total" with N > total.
+        if (initial > 0) {
+            uint64_t init_u = static_cast<uint64_t>(initial);  // validated >= 0
+            uint64_t seed = (total > 0 && init_u > total) ? total : init_u;
+            task->initial = seed;
+            task->completed.store(seed, std::memory_order_relaxed);
+        }
         // Publish task0 before push_back so concurrent tick/advance can
         // see it. We're still single-threaded here (init), but use release
         // semantics so the hot path's acquire load sees a fully-built Task.
@@ -1855,6 +2148,9 @@ PyObject* Progress_enter(PyProgress* self, PyObject* /*args*/) {
     if (st->running.compare_exchange_strong(
             expected, true,
             std::memory_order_acq_rel, std::memory_order_acquire)) {
+        // Stamp the enter instant for delay= (the render loop measures the
+        // suppression window against it).
+        st->enter_ns = now_ns();
         // Synchronous first-frame paint: eliminate the 50ms (min_interval)
         // gap between __enter__ and the render thread's first wakeup.
         // render_frame updates last_snapshot + last_rendered_lines, so the
@@ -1863,10 +2159,12 @@ PyObject* Progress_enter(PyProgress* self, PyObject* /*args*/) {
         // duplicate frame. The render thread hasn't started yet, so no
         // other thread can be touching state — but we still acquire the
         // render mutex briefly for consistency with every other state
-        // mutation path.
-        if (!st->columns.empty() && !st->tasks.empty()) {
+        // mutation path. Skipped when delay > 0: a delayed bar must stay
+        // invisible until the window elapses (the render loop paints it).
+        if (st->delay <= 0.0 && !st->columns.empty() && !st->tasks.empty()) {
             std::lock_guard<std::mutex> lg(st->render_mtx);
             render_frame(st);
+            st->shown = true;
         }
         try {
             st->render_thread = std::thread(render_loop, st);
@@ -2182,6 +2480,148 @@ PyObject* Progress_set_description(PyProgress* self, PyObject* desc_obj) {
     Py_RETURN_NONE;
 }
 
+// set_postfix_str(task_id, str) — set a task's trailing annotation, rendered
+// by COL_POSTFIX (present in the default column set). Same lock discipline as
+// set_task_description: the render thread reads `postfix` under render_mtx.
+PyObject* Progress_set_postfix_str(PyProgress* self,
+                                   PyObject* const* args,
+                                   Py_ssize_t nargs) {
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "set_postfix_str(task_id, str)");
+        return nullptr;
+    }
+    long task_id = PyLong_AsLong(args[0]);
+    if (PyErr_Occurred()) return nullptr;
+    if (!PyUnicode_Check(args[1])) {
+        PyErr_SetString(PyExc_TypeError, "postfix must be str");
+        return nullptr;
+    }
+    Py_ssize_t plen = 0;
+    const char* ps = PyUnicode_AsUTF8AndSize(args[1], &plen);
+    if (!ps) return nullptr;
+    // ps points into args[1]'s cached UTF-8 buffer (kept alive by the caller,
+    // not mutated), so reading it with the GIL dropped is safe.
+    bool oob = false;
+    auto* st = self->state;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (task_id < 0 ||
+            static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            st->tasks[static_cast<size_t>(task_id)]->postfix.assign(
+                ps, static_cast<size_t>(plen));
+        }
+    }
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return nullptr;
+    }
+    st->render_cv.notify_one();
+    Py_RETURN_NONE;
+}
+
+// set_visible(task_id, visible) — hide or show a task's row (rich's
+// `update(visible=)`). A hidden task keeps counting; it just isn't painted.
+// Invalidates the delta cache and forces a repaint so the row count change is
+// reflected immediately (the multi-row clear handles the shrink/grow).
+PyObject* Progress_set_visible(PyProgress* self,
+                               PyObject* const* args,
+                               Py_ssize_t nargs) {
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError, "set_visible(task_id, visible)");
+        return nullptr;
+    }
+    long task_id = PyLong_AsLong(args[0]);
+    if (PyErr_Occurred()) return nullptr;
+    int vis = PyObject_IsTrue(args[1]);
+    if (vis < 0) return nullptr;
+    bool oob = false;
+    auto* st = self->state;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (task_id < 0 ||
+            static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            st->tasks[static_cast<size_t>(task_id)]->visible = (vis != 0);
+            // Row set changed: force a full repaint next frame.
+            st->delta_valid  = false;
+            st->force_render = true;
+        }
+    }
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return nullptr;
+    }
+    st->render_cv.notify_one();
+    Py_RETURN_NONE;
+}
+
+// reset(task_id=0, total=None) — restart a task: counter back to 0, elapsed/
+// rate/eta timers re-based to now, completion freeze and EMA state cleared,
+// and optionally a new total installed. Mirrors tqdm.reset(); lets a bar be
+// reused across phases without reconstructing the Progress. Takes render_mtx
+// so the reset is atomic vs. a mid-flight render frame.
+PyObject* Progress_reset(PyProgress* self, PyObject* args, PyObject* kwds) {
+    static const char* kwlist[] = {"task_id", "total", nullptr};
+    long task_id = 0;
+    PyObject* total_obj = Py_None;
+    if (!PyArg_ParseTupleAndKeywords(
+            args, kwds, "|lO", const_cast<char**>(kwlist),
+            &task_id, &total_obj)) {
+        return nullptr;
+    }
+    bool set_total = false;
+    uint64_t new_total = 0;
+    if (total_obj != Py_None) {
+        if (barflow_pylong_to_u64(total_obj, &new_total) < 0) return nullptr;
+        set_total = true;
+    }
+    uint64_t tns = now_ns();
+    bool oob = false;
+    auto* st = self->state;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (task_id < 0 ||
+            static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            Task* t = st->tasks[static_cast<size_t>(task_id)].get();
+            // Zero the atomic counter and re-base every derived clock. Order
+            // is immaterial: the render thread would only observe a coherent
+            // pre- or post-reset snapshot under the same lock.
+            t->completed.store(0, std::memory_order_relaxed);
+            t->last_snapshot   = 0;
+            t->initial         = 0;   // fresh restart: no resume offset
+            t->start_time_ns   = tns;
+            t->finish_time_ns  = 0;
+            t->ema_primed      = false;
+            t->ema_rate        = 0.0;
+            t->ema_last_completed = 0;
+            t->ema_last_ns     = 0;
+            if (set_total) t->total = new_total;
+            // Force a repaint: zeroing both completed and last_snapshot makes
+            // the render loop's `completed != last_snapshot` dirty check false,
+            // so without this a spinner-less column set would keep showing the
+            // pre-reset frame (e.g. "100/100") until the next advance().
+            st->force_render = true;
+        }
+    }
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return nullptr;
+    }
+    st->render_cv.notify_one();
+    Py_RETURN_NONE;
+}
+
 // refresh() — force an immediate render. Useful when the caller wants
 // to flush the current state (e.g. after a burst of updates) without
 // waiting for the next scheduled tick. Drops the GIL around the render
@@ -2347,6 +2787,43 @@ PyObject* Progress_get_completed(PyProgress* self, void* /*closure*/) {
     return PyLong_FromUnsignedLongLong(v);
 }
 
+// total — task 0's total, or None when there is no task or the total is 0
+// (unbounded/indeterminate), matching tqdm's `total=None` convention.
+PyObject* Progress_get_total(PyProgress* self, void* /*closure*/) {
+    auto* st = self->state;
+    uint64_t total = 0;
+    bool have = false;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (!st->tasks.empty()) { total = st->tasks[0]->total; have = true; }
+    }
+    Py_END_ALLOW_THREADS
+    if (!have || total == 0) Py_RETURN_NONE;
+    return PyLong_FromUnsignedLongLong(total);
+}
+
+// elapsed — task 0's wall time in seconds, frozen at completion (reads the
+// finish-time snapshot the render thread records; no mutation here).
+PyObject* Progress_get_elapsed(PyProgress* self, void* /*closure*/) {
+    auto* st = self->state;
+    uint64_t tns = now_ns();
+    double elapsed = 0.0;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (!st->tasks.empty()) {
+            Task* t = st->tasks[0].get();
+            uint64_t clock = t->finish_time_ns != 0 ? t->finish_time_ns : tns;
+            if (clock > t->start_time_ns) {
+                elapsed = static_cast<double>(clock - t->start_time_ns) / 1e9;
+            }
+        }
+    }
+    Py_END_ALLOW_THREADS
+    return PyFloat_FromDouble(elapsed);
+}
+
 PyObject* Progress_get_n_tasks(PyProgress* self, void* /*closure*/) {
     // Drop the GIL around render_mtx (see set_total): render_frame may hold
     // the lock while a CallbackColumn re-enters Python and waits on the GIL.
@@ -2453,17 +2930,45 @@ PyObject* Progress_render_line(PyProgress* self,
             RenderCtx ctx;
             ctx.vt_enabled = st->vt_enabled;
             uint64_t tns = now_ns();
-            ctx.elapsed = static_cast<double>(tns - task->start_time_ns) / 1e9;
-            ctx.rate = ctx.elapsed > 0
-                ? static_cast<double>(completed) / ctx.elapsed : 0.0;
+            // Freeze the clock on a completed task via task_clock_ns (which
+            // records finish_time_ns on first observation). This is load-
+            // bearing, not just a preview nicety: on a live bar whose render
+            // thread hasn't yet woken to freeze the instant, render_line must
+            // pin it here so a finished task reports a stable final elapsed/
+            // rate rather than a value that differs on each call.
+            uint64_t clock = task_clock_ns(*task, completed, tns);
+            ctx.elapsed = static_cast<double>(clock - task->start_time_ns) / 1e9;
+            {
+                uint64_t done = completed > task->initial
+                                ? completed - task->initial : 0;
+                ctx.rate = ctx.elapsed > 0
+                    ? static_cast<double>(done) / ctx.elapsed : 0.0;
+            }
             ctx.frac = task->total > 0
                 ? std::min(1.0, static_cast<double>(completed) /
                                 static_cast<double>(task->total))
                 : -1.0;
             ctx.frame_tick = st->frame_tick;
+            // render_line is a side-effect-free preview, so it reports the
+            // whole-run average rate (above) rather than mutating the task's
+            // EMA state the way a live frame's compute_rate would.
+            ctx.unit         = st->unit.c_str();
+            ctx.unit_len     = st->unit.size();
+            ctx.unit_scale   = st->unit_scale;
+            ctx.unit_divisor = st->unit_divisor;
             ctx.bar_width_override = -1;
             ctx.snapshot = st->has_callback_col
                 ? build_task_snapshot(*task, ctx) : nullptr;
+            // Align to the widest description across all tasks so a logged
+            // line matches the live frame's column positions.
+            ctx.desc_pad_to = 0;
+            if (st->align_columns) {
+                for (auto& tk : st->tasks) {
+                    if (!tk->visible) continue;
+                    int c = count_display_cells(tk->description);
+                    if (c > ctx.desc_pad_to) ctx.desc_pad_to = c;
+                }
+            }
             for (size_t ci = 0; ci < st->columns.size(); ++ci) {
                 render_column(st->columns[ci], *task, out, ctx);
             }
@@ -2513,12 +3018,28 @@ PyMethodDef Progress_methods[] = {
         "Suspend the render thread and clear the bar so external writes are clean."},
     {"resume",     reinterpret_cast<PyCFunction>(Progress_resume),  METH_NOARGS,
         "Resume rendering after pause(), repainting the bar."},
+    {"reset",      reinterpret_cast<PyCFunction>(Progress_reset),
+        METH_VARARGS | METH_KEYWORDS,
+        "reset(task_id=0, total=None) — restart a task's counter, timers, and "
+        "completion/EMA state; optionally set a new total."},
+    {"set_postfix_str",
+        reinterpret_cast<PyCFunction>(Progress_set_postfix_str), METH_FASTCALL,
+        "set_postfix_str(task_id, str) — set a task's trailing annotation "
+        "(rendered by the postfix column, present in the default set)."},
+    {"set_visible",
+        reinterpret_cast<PyCFunction>(Progress_set_visible), METH_FASTCALL,
+        "set_visible(task_id, visible) — hide or show a task's row; it keeps "
+        "counting while hidden."},
     {nullptr, nullptr, 0, nullptr}
 };
 
 PyGetSetDef Progress_getset[] = {
     {"completed", reinterpret_cast<getter>(Progress_get_completed), nullptr, nullptr, nullptr},
     {"n_tasks",   reinterpret_cast<getter>(Progress_get_n_tasks),   nullptr, nullptr, nullptr},
+    {"total",     reinterpret_cast<getter>(Progress_get_total),     nullptr,
+        const_cast<char*>("Task 0's total (None when unbounded)."), nullptr},
+    {"elapsed",   reinterpret_cast<getter>(Progress_get_elapsed),   nullptr,
+        const_cast<char*>("Task 0's elapsed wall time in seconds."), nullptr},
     {nullptr, nullptr, nullptr, nullptr, nullptr}
 };
 
@@ -2642,6 +3163,30 @@ PyObject* Tracker_iternext(PyTracker* self) {
     return nxt;
 }
 
+// __length_hint__ -> remaining items (total - completed), so
+// `list(track(range(n)))` and other consumers can preallocate. Returns 0
+// (the "unknown" convention) for an unbounded task or once completed
+// overtakes total. Reads the atomic counter lock-free; `total` is stable
+// after construction for the single-task bars Tracker wraps.
+PyObject* Tracker_length_hint(PyTracker* self, PyObject* /*unused*/) {
+    uint64_t remaining = 0;
+    if (self->task) {
+        uint64_t total = self->task->total;
+        if (total > 0) {
+            uint64_t done = self->task->completed.load(std::memory_order_relaxed);
+            remaining = done < total ? total - done : 0;
+        }
+    }
+    return PyLong_FromUnsignedLongLong(remaining);
+}
+
+PyMethodDef Tracker_methods[] = {
+    {"__length_hint__", reinterpret_cast<PyCFunction>(Tracker_length_hint),
+     METH_NOARGS,
+     "Remaining items (total - completed); 0 when unbounded/unknown."},
+    {nullptr, nullptr, 0, nullptr}
+};
+
 PyTypeObject TrackerType = { PyVarObject_HEAD_INIT(nullptr, 0) };
 
 // -------- Module init --------
@@ -2702,6 +3247,7 @@ extern "C" PyMODINIT_FUNC PyInit__core(void) {
     TrackerType.tp_doc       = "Fast iterator wrapper bound to a Progress task.";
     TrackerType.tp_iter      = reinterpret_cast<getiterfunc>(Tracker_iter);
     TrackerType.tp_iternext  = reinterpret_cast<iternextfunc>(Tracker_iternext);
+    TrackerType.tp_methods   = Tracker_methods;
     TrackerType.tp_init      = reinterpret_cast<initproc>(Tracker_init);
     TrackerType.tp_new       = PyType_GenericNew;
     if (PyType_Ready(&TrackerType) < 0) return nullptr;
@@ -2740,6 +3286,7 @@ extern "C" PyMODINIT_FUNC PyInit__core(void) {
     PyModule_AddIntConstant(m, "COL_ETA",         COL_ETA);
     PyModule_AddIntConstant(m, "COL_SPINNER",     COL_SPINNER);
     PyModule_AddIntConstant(m, "COL_CALLBACK",    COL_CALLBACK);
+    PyModule_AddIntConstant(m, "COL_POSTFIX",     COL_POSTFIX);
 
     // `g_simple_namespace` is loaded lazily on first CallbackColumn render
     // (see ensure_simple_namespace) so cold import doesn't pay for

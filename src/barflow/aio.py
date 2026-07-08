@@ -55,7 +55,9 @@ class _AsyncTracker:
 
 
 def atrack(aiterable, total=None, desc=None, *, columns=None, theme=None,
-           task_id=0, disable=False, min_interval=0.05, capture_output=False):
+           task_id=0, disable=False, min_interval=0.05, capture_output=False,
+           smoothing=0.0, leave=True, unit="it", unit_scale=False,
+           unit_divisor=1000, initial=0, delay=0.0):
     """Wrap an async iterable in a live progress bar. Async mirror of
     `barflow.track` — same fast/slow dispatch, so `theme=`, column
     factories, bare-string columns, and `capture_output=` all behave
@@ -73,6 +75,10 @@ def atrack(aiterable, total=None, desc=None, *, columns=None, theme=None,
             "For multiple bars use barflow.Progress + add_task()."
         )
 
+    if disable is None:
+        from . import _auto_disable
+        disable = _auto_disable()
+
     if total is None:
         try:
             total = len(aiterable)
@@ -89,6 +95,13 @@ def atrack(aiterable, total=None, desc=None, *, columns=None, theme=None,
             disable=disable,
             min_interval=min_interval,
             capture_output=capture_output,
+            smoothing=smoothing,
+            leave=leave,
+            unit=unit,
+            unit_scale=unit_scale,
+            unit_divisor=unit_divisor,
+            initial=initial,
+            delay=delay,
         )
     else:
         p = _CoreProgress(
@@ -96,6 +109,13 @@ def atrack(aiterable, total=None, desc=None, *, columns=None, theme=None,
             desc=desc,
             min_interval=min_interval,
             disable=disable,
+            smoothing=smoothing,
+            leave=leave,
+            unit=unit,
+            unit_scale=unit_scale,
+            unit_divisor=float(unit_divisor),
+            initial=initial,
+            delay=delay,
         )
 
     p.__enter__()
