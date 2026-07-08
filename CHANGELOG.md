@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-08
+
 ### Added
 
 - **`reset(task_id=0, total=None)`.** Restart a task in place — counter back to
