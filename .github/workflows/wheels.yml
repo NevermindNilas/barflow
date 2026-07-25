@@ -25,14 +25,12 @@ jobs:
           - { os: windows-latest,   python: '312',  archs: AMD64,        label: win-cp312 }
           - { os: windows-latest,   python: '313',  archs: AMD64,        label: win-cp313 }
           - { os: windows-latest,   python: '314',  archs: AMD64,        label: win-cp314 }
-          - { os: windows-latest,   python: '313t', archs: AMD64,        label: win-cp313t, free_threaded: true }
           - { os: windows-latest,   python: '314t', archs: AMD64,        label: win-cp314t, free_threaded: true }
           # Windows ARM64 (native windows-11-arm runner; win_arm64 is CPython 3.11+)
           - { os: windows-11-arm,   python: '311',  archs: ARM64,        label: win-cp311-arm64 }
           - { os: windows-11-arm,   python: '312',  archs: ARM64,        label: win-cp312-arm64 }
           - { os: windows-11-arm,   python: '313',  archs: ARM64,        label: win-cp313-arm64 }
           - { os: windows-11-arm,   python: '314',  archs: ARM64,        label: win-cp314-arm64 }
-          - { os: windows-11-arm,   python: '313t', archs: ARM64,        label: win-cp313t-arm64, free_threaded: true }
           - { os: windows-11-arm,   python: '314t', archs: ARM64,        label: win-cp314t-arm64, free_threaded: true }
           # macOS (universal: x86_64 + arm64)
           - { os: macos-latest,     python: '310',  archs: 'x86_64 arm64', label: mac-cp310 }
@@ -40,7 +38,6 @@ jobs:
           - { os: macos-latest,     python: '312',  archs: 'x86_64 arm64', label: mac-cp312 }
           - { os: macos-latest,     python: '313',  archs: 'x86_64 arm64', label: mac-cp313 }
           - { os: macos-latest,     python: '314',  archs: 'x86_64 arm64', label: mac-cp314 }
-          - { os: macos-latest,     python: '313t', archs: 'x86_64 arm64', label: mac-cp313t, free_threaded: true }
           - { os: macos-latest,     python: '314t', archs: 'x86_64 arm64', label: mac-cp314t, free_threaded: true }
           # Linux x86_64 (native runner)
           - { os: ubuntu-latest,    python: '310',  archs: x86_64,       label: linux-cp310-x86_64 }
@@ -48,7 +45,6 @@ jobs:
           - { os: ubuntu-latest,    python: '312',  archs: x86_64,       label: linux-cp312-x86_64 }
           - { os: ubuntu-latest,    python: '313',  archs: x86_64,       label: linux-cp313-x86_64 }
           - { os: ubuntu-latest,    python: '314',  archs: x86_64,       label: linux-cp314-x86_64 }
-          - { os: ubuntu-latest,    python: '313t', archs: x86_64,       label: linux-cp313t-x86_64, free_threaded: true }
           - { os: ubuntu-latest,    python: '314t', archs: x86_64,       label: linux-cp314t-x86_64, free_threaded: true }
           # Linux aarch64 (native arm runner — no QEMU)
           - { os: ubuntu-24.04-arm, python: '310',  archs: aarch64,      label: linux-cp310-aarch64 }
@@ -56,7 +52,6 @@ jobs:
           - { os: ubuntu-24.04-arm, python: '312',  archs: aarch64,      label: linux-cp312-aarch64 }
           - { os: ubuntu-24.04-arm, python: '313',  archs: aarch64,      label: linux-cp313-aarch64 }
           - { os: ubuntu-24.04-arm, python: '314',  archs: aarch64,      label: linux-cp314-aarch64 }
-          - { os: ubuntu-24.04-arm, python: '313t', archs: aarch64,      label: linux-cp313t-aarch64, free_threaded: true }
           - { os: ubuntu-24.04-arm, python: '314t', archs: aarch64,      label: linux-cp314t-aarch64, free_threaded: true }
     steps:
       - uses: actions/checkout@v6

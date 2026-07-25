@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Free-threaded CPython 3.13 (`cp313t`) wheels.** Dropped from the build
+  matrix across all platforms; `cp314t` remains the supported free-threaded
+  target. Non-free-threaded CPython 3.13 (`cp313`) is unaffected and still
+  ships on every platform. Users on free-threaded 3.13 can still install from
+  the source distribution.
+
 ## [0.5.1] — 2026-07-26
 
 ### Fixed

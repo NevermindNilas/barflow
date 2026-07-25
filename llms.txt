@@ -226,11 +226,12 @@ the second targets anyone touching the C core.
   `total=0`. Use a theme that only shows a spinner + rate +
   elapsed, or build one manually with just `SpinnerColumn` +
   `CountColumn` + `RateColumn`.
-- **Free-threaded builds.** `cp313t` / `cp314t` wheels exist on
-  PyPI. On a no-GIL interpreter, `Tracker.tp_iternext` still does
-  the same atomic `fetch_add`, and producer threads scale almost
-  linearly across cores because the hot path never acquires a
-  lock. The render thread is still single-threaded.
+- **Free-threaded builds.** `cp314t` wheels exist on PyPI
+  (`cp313t` was dropped after 0.5.1). On a no-GIL interpreter,
+  `Tracker.tp_iternext` still does the same atomic `fetch_add`, and
+  producer threads scale almost linearly across cores because the
+  hot path never acquires a lock. The render thread is still
+  single-threaded.
 
 ### For contributors touching `_core.cpp`
 

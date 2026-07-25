@@ -277,7 +277,7 @@ pip install barflow
 
 Wheels are published for Windows (AMD64), Linux (x86_64, aarch64), and
 macOS (x86_64, arm64) for CPython 3.10 through 3.14, including the
-free-threaded `cp313t` / `cp314t` builds.
+free-threaded `cp314t` build.
 
 ## Features
 
