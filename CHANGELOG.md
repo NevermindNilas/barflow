@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-26
+
+### Fixed
+
+- **`from barflow.themes import *` raised `AttributeError`.** `themes.__all__`
+  listed six `THEMES` registry *keys* (`rich`, `arrows`, `shade`, `line`,
+  `double`, `round`) rather than the functions they alias, and those names are
+  not module attributes — so a star-import failed outright. `__all__` now names
+  the real functions (`rich_like`, `arrows_march`, `shade_cool`, `line_clean`,
+  `double_frame`, `round_retro`). The registry keys are untouched:
+  `themes.get("shade")` and `Progress(theme="rich")` behave exactly as before.
+
+### Changed
+
+- **Internal cleanup — no public API change.** Duplicated logic in the C++ core
+  collapsed to a single implementation each: the cursor-up escape (six copies),
+  the physical-row count that drives the multi-row walk-back (four copies), the
+  ANSI/UTF-8 display-cell scan shared by width counting and truncation (two
+  copies that had to be kept in sync by hand), and the drop-GIL → lock →
+  bounds-check prologue shared by five per-task setters. Dead locals and a
+  write-only field removed; `track()` and `atrack()` now share one Progress
+  construction path. Net ~290 lines deleted.
+
 ## [0.5.0] — 2026-07-08
 
 ### Added
@@ -393,7 +416,10 @@ Initial public release.
   (x86_64 + arm64), and Linux (manylinux_2_28 + musllinux_1_2,
   x86_64 + aarch64). Source distribution published alongside.
 
-[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/NevermindNilas/barflow/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/NevermindNilas/barflow/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/NevermindNilas/barflow/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/NevermindNilas/barflow/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/NevermindNilas/barflow/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/NevermindNilas/barflow/compare/v0.2.3...v0.3.0
