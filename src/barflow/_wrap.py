@@ -12,7 +12,6 @@ handing the object off entirely.
 
 from __future__ import annotations
 
-import io
 import os
 import sys
 
@@ -93,7 +92,15 @@ def _auto_disable():
     """Quiet the bar when stderr isn't a terminal (piped/redirected/no
     console) — otherwise a bar would just spam a log file with control codes.
     A stderr that's been swapped for something without isatty() is treated as
-    non-interactive."""
+    non-interactive.
+
+    Deliberately NOT shared with `barflow._auto_disable`, which looks similar
+    but catches bare `Exception`. Here the narrow `(AttributeError, ValueError)`
+    is load-bearing: a stream whose `isatty()` raises anything else (an OSError
+    from a detached/closed fd, say) is a real I/O fault the caller of
+    `wrap_file(disable=None)` should see, not something to paper over by
+    silently hiding the bar.
+    """
     try:
         return not sys.stderr.isatty()
     except (AttributeError, ValueError):

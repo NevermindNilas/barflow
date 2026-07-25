@@ -26,6 +26,49 @@ def _auto_disable():
         return True
 
 
+def _build_progress(total, desc, columns, theme, disable, min_interval,
+                    capture_output, smoothing, leave, unit, unit_scale,
+                    unit_divisor, initial, delay):
+    """Construct the Progress backing a track()/atrack() call.
+
+    Fast path: no columns, no theme, no capture_output → straight to
+    `_core.Progress` (one C-extension construction, no Python subclass).
+    Slow path: any decoration → route through the Python `Progress` class,
+    which resolves themes/columns before calling into the core.
+    """
+    if columns or theme or capture_output:
+        from . import _progress
+        return _progress.Progress(
+            *(columns or ()),
+            total=total,
+            desc=desc,
+            theme=theme,
+            disable=disable,
+            min_interval=min_interval,
+            capture_output=capture_output,
+            smoothing=smoothing,
+            leave=leave,
+            unit=unit,
+            unit_scale=unit_scale,
+            unit_divisor=unit_divisor,
+            initial=initial,
+            delay=delay,
+        )
+    return _core.Progress(
+        total=total,
+        desc=desc,
+        min_interval=min_interval,
+        disable=disable,
+        smoothing=smoothing,
+        leave=leave,
+        unit=unit,
+        unit_scale=unit_scale,
+        unit_divisor=float(unit_divisor),
+        initial=initial,
+        delay=delay,
+    )
+
+
 def track(iterable, total=None, desc=None, *, columns=None, theme=None,
           task_id=0, disable=False, min_interval=0.05, capture_output=False,
           smoothing=0.0, leave=True, unit="it", unit_scale=False,
@@ -65,38 +108,10 @@ def track(iterable, total=None, desc=None, *, columns=None, theme=None,
         except TypeError:
             total = 0
 
-    if columns or theme or capture_output:
-        from . import _progress
-        progress = _progress.Progress(
-            *(columns or ()),
-            total=total,
-            desc=desc,
-            theme=theme,
-            disable=disable,
-            min_interval=min_interval,
-            capture_output=capture_output,
-            smoothing=smoothing,
-            leave=leave,
-            unit=unit,
-            unit_scale=unit_scale,
-            unit_divisor=unit_divisor,
-            initial=initial,
-            delay=delay,
-        )
-    else:
-        progress = _core.Progress(
-            total=total,
-            desc=desc,
-            min_interval=min_interval,
-            disable=disable,
-            smoothing=smoothing,
-            leave=leave,
-            unit=unit,
-            unit_scale=unit_scale,
-            unit_divisor=float(unit_divisor),
-            initial=initial,
-            delay=delay,
-        )
+    progress = _build_progress(
+        total, desc, columns, theme, disable, min_interval, capture_output,
+        smoothing, leave, unit, unit_scale, unit_divisor, initial, delay,
+    )
 
     progress.__enter__()
     tracker = Tracker(iter(iterable), progress, task_id=task_id, owns_progress=True)

@@ -696,6 +696,50 @@ static inline int codepoint_width(uint32_t cp) {
     return 1;
 }
 
+// Advance one "unit" through a rendered byte string at offset `i`, reporting
+// how many bytes it spans (*adv) and how many terminal cells it occupies
+// (*width). The two callers below — the cell counter and the truncator —
+// must agree exactly on this accounting, so it lives in one place.
+//
+// Three kinds of unit:
+//   * an ANSI CSI sequence (\x1b[...<final>), consumed atomically, 0 cells;
+//   * a \r / \n / \t control byte, 1 byte, 0 cells;
+//   * one UTF-8 code point, whose width comes from codepoint_width, adjusted
+//     by a following variation selector (VS16 promotes a 1-cell base to 2,
+//     VS15 forces 1). The selector itself is left for the next call, where
+//     codepoint_width reports it as zero-width.
+// `*adv` is always >= 1, so callers can never loop forever.
+static inline void scan_cell(const char* data, size_t n, size_t i,
+                             size_t* adv, int* width) {
+    unsigned char c = static_cast<unsigned char>(data[i]);
+    if (c == 0x1b && i + 1 < n && data[i + 1] == '[') {
+        size_t j = i + 2;
+        while (j < n) {
+            unsigned char x = static_cast<unsigned char>(data[j++]);
+            if (x >= 0x40 && x <= 0x7E) break;
+        }
+        *adv = j - i;
+        *width = 0;
+        return;
+    }
+    if (c == '\r' || c == '\n' || c == '\t') {
+        *adv = 1;
+        *width = 0;
+        return;
+    }
+    size_t a = 1;
+    uint32_t cp = utf8_decode(data, n, i, &a);
+    int w = codepoint_width(cp);
+    if (i + a < n) {
+        size_t adv2 = 1;
+        uint32_t nxt = utf8_decode(data, n, i + a, &adv2);
+        if (nxt == 0xFE0F) { if (w == 1) w = 2; }
+        else if (nxt == 0xFE0E) { w = 1; }
+    }
+    *adv = a;
+    *width = w;
+}
+
 // Truncate a rendered byte string to at most `max_cells` display cells
 // and (only when VT is on) append an ANSI reset so any dangling style
 // from the cut-off tail cannot bleed into whatever is rendered after it.
@@ -709,30 +753,12 @@ static void truncate_to_cells(std::string& s, int max_cells, bool vt) {
     size_t last_safe = 0;
     const size_t n = s.size();
     while (i < n) {
-        unsigned char c = static_cast<unsigned char>(s[i]);
-        if (c == 0x1b && i + 1 < n && s[i + 1] == '[') {
-            size_t j = i + 2;
-            while (j < n) {
-                unsigned char x = static_cast<unsigned char>(s[j++]);
-                if (x >= 0x40 && x <= 0x7E) break;
-            }
-            i = j;
-            last_safe = i;
-            continue;
-        }
-        if (c == '\r' || c == '\n' || c == '\t') {
-            ++i; last_safe = i; continue;
-        }
         size_t adv = 1;
-        uint32_t cp = utf8_decode(s.data(), n, i, &adv);
-        int w = codepoint_width(cp);
-        if (i + adv < n) {
-            size_t adv2 = 1;
-            uint32_t nxt = utf8_decode(s.data(), n, i + adv, &adv2);
-            if (nxt == 0xFE0F) { if (w == 1) w = 2; }
-            else if (nxt == 0xFE0E) { w = 1; }
-        }
-        if (cells + w > max_cells) break;
+        int    w   = 0;
+        scan_cell(s.data(), n, i, &adv, &w);
+        // Zero-width units (escapes, controls) are always kept — they cost
+        // no cells, and cutting inside one would emit a broken sequence.
+        if (w > 0 && cells + w > max_cells) break;
         cells += w;
         i += adv;
         last_safe = i;
@@ -749,25 +775,9 @@ static int count_display_cells(const char* data, size_t n) {
     int cells = 0;
     size_t i = 0;
     while (i < n) {
-        unsigned char c = static_cast<unsigned char>(data[i]);
-        if (c == 0x1b && i + 1 < n && data[i + 1] == '[') {
-            i += 2;
-            while (i < n) {
-                unsigned char x = static_cast<unsigned char>(data[i++]);
-                if (x >= 0x40 && x <= 0x7E) break;
-            }
-            continue;
-        }
-        if (c == '\r' || c == '\n' || c == '\t') { ++i; continue; }
         size_t adv = 1;
-        uint32_t cp = utf8_decode(data, n, i, &adv);
-        int w = codepoint_width(cp);
-        if (i + adv < n) {
-            size_t adv2 = 1;
-            uint32_t nxt = utf8_decode(data, n, i + adv, &adv2);
-            if (nxt == 0xFE0F) { if (w == 1) w = 2; }
-            else if (nxt == 0xFE0E) { w = 1; }
-        }
+        int    w   = 0;
+        scan_cell(data, n, i, &adv, &w);
         cells += w;
         i += adv;
     }
@@ -1179,6 +1189,33 @@ static inline void append_cursor_right(std::string& buf, int n) {
     buf.push_back('C');
 }
 
+// Append an ANSI cursor-up (CUU) escape `\x1b[<n>A` to `buf`. No-op when
+// n <= 0. Vertical moves preserve the column, so this walks back over the
+// bar area's physical rows without disturbing horizontal position.
+static inline void append_cursor_up(std::string& buf, int n) {
+    if (n <= 0) return;
+    buf.append("\x1b[", 2);
+    char tmp[20];
+    size_t len = u64_to_chars(tmp, static_cast<uint64_t>(n));
+    buf.append(tmp, len);
+    buf.push_back('A');
+}
+
+// How many physical terminal rows the given per-task cell counts occupy at
+// `term_w` columns. Terminals soft-wrap already-written content, so a task
+// that printed one line at 120 columns spans three rows at 40. A width of 0
+// means "unknown" (pipe/redirect) and falls back to one row per task.
+// Every row count is floored at 1 so an empty task line still owns a row.
+static int physical_rows(const std::vector<int>& task_cells, int term_w) {
+    int total = 0;
+    for (int c : task_cells) {
+        int r = term_w > 0 ? (c + term_w - 1) / term_w : 1;
+        if (r < 1) r = 1;
+        total += r;
+    }
+    return total;
+}
+
 // Minimum bytes-saved threshold below which we just re-emit the
 // column's bytes instead of a cursor-right escape. A CUF escape is
 // 4-6 bytes (\x1b[N..C); emitting it for a column whose output is
@@ -1293,30 +1330,14 @@ void render_frame(ProgressState* st) {
     // ever emitting \n, which avoids a scroll if the bar area is
     // sitting against the bottom edge of the viewport.
     if (!st->last_task_cells.empty() && st->vt_enabled) {
-        int total_rows = 0;
-        for (int c : st->last_task_cells) {
-            int r;
-            if (term_w > 0) {
-                r = (c + term_w - 1) / term_w;
-                if (r < 1) r = 1;
-            } else {
-                r = 1;
-            }
-            total_rows += r;
-        }
+        int total_rows = physical_rows(st->last_task_cells, term_w);
         // Overshoot by one — cheap insurance against an off-by-one in
         // cells_per_task (e.g. a callback column emitted a glyph the
         // terminal treats as 2 cells but we counted as 1).
         int clear_rows = total_rows + 1;
         int rows_up    = total_rows > 0 ? total_rows - 1 : 0;
 
-        if (rows_up > 0) {
-            buf.append("\x1b[", 2);
-            char tmp[20];
-            size_t n = u64_to_chars(tmp, static_cast<uint64_t>(rows_up));
-            buf.append(tmp, n);
-            buf.push_back('A');
-        }
+        append_cursor_up(buf, rows_up);
         buf.push_back('\r');
 
         if (!use_delta) {
@@ -1327,14 +1348,7 @@ void render_frame(ProgressState* st) {
                 }
             }
             // Walk back to the top of the now-empty bar area.
-            if (clear_rows > 1) {
-                buf.append("\x1b[", 2);
-                char tmp[20];
-                size_t n = u64_to_chars(
-                    tmp, static_cast<uint64_t>(clear_rows - 1));
-                buf.append(tmp, n);
-                buf.push_back('A');
-            }
+            append_cursor_up(buf, clear_rows - 1);
             buf.push_back('\r');
         }
     } else {
@@ -1394,9 +1408,6 @@ void render_frame(ProgressState* st) {
         // delta path; any task that falls back to full-emit erases its
         // own row inline below before re-emitting.
         if (!use_delta && st->vt_enabled) buf.append("\x1b[2K", 4);
-        // Mark the offset where this task's visible content begins so
-        // we can measure its display-cell footprint after rendering.
-        size_t task_start_offset = buf.size();
 
         uint64_t completed = task->completed.load(std::memory_order_acquire);
         task->last_snapshot = completed;
@@ -1664,12 +1675,8 @@ void render_frame(ProgressState* st) {
                             buf.append("\x1b[1B", 4);   // down one row, no scroll
                             buf.append("\x1b[2K", 4);   // erase that stale row
                         }
-                        buf.append("\x1b[", 2);
-                        char tmp[20];
-                        size_t nn = u64_to_chars(
-                            tmp, static_cast<uint64_t>(surplus));
-                        buf.append(tmp, nn);
-                        buf.push_back('A');             // walk back up to content row
+                        // Walk back up to the content row.
+                        append_cursor_up(buf, surplus);
                     }
                 }
             }
@@ -1711,10 +1718,6 @@ void render_frame(ProgressState* st) {
             if (visible_cols[ci]) task_cells_total += this_cells[ci];
         }
         st->last_task_cells.push_back(task_cells_total);
-        // task_start_offset is retained for debugging / future use;
-        // we no longer re-measure against buf because col_out now
-        // carries the truth.
-        (void)task_start_offset;
 
         if (ctx.snapshot) Py_DECREF(ctx.snapshot);
         visible++;
@@ -1803,20 +1806,8 @@ void render_loop(ProgressState* st) {
                 std::string& buf = st->scratch;
                 buf.clear();
                 int term_w = query_terminal_width(st);
-                int total_rows = 0;
-                for (int c : st->last_task_cells) {
-                    int r = (term_w > 0) ? ((c + term_w - 1) / term_w) : 1;
-                    if (r < 1) r = 1;
-                    total_rows += r;
-                }
-                if (total_rows > 1) {
-                    buf.append("\x1b[", 2);
-                    char tmp[20];
-                    size_t n = u64_to_chars(
-                        tmp, static_cast<uint64_t>(total_rows - 1));
-                    buf.append(tmp, n);
-                    buf.push_back('A');
-                }
+                int total_rows = physical_rows(st->last_task_cells, term_w);
+                append_cursor_up(buf, total_rows - 1);
                 buf.push_back('\r');
                 buf.append("\x1b[J", 3);   // erase from cursor to end of screen
                 write_bytes(st, buf.data(), buf.size());
@@ -2367,6 +2358,46 @@ PyObject* Progress_add_task(PyProgress* self, PyObject* args, PyObject* kwds) {
     return PyLong_FromLong(id);
 }
 
+// Run `body(Task&)` against task `task_id` while holding render_mtx.
+//
+// This is the shared prologue for every cold per-task setter. It encodes the
+// three rules those setters must all obey:
+//
+//   1. Drop the GIL BEFORE taking render_mtx. render_frame holds render_mtx
+//      while a CallbackColumn re-enters Python via PyGILState_Ensure, so a
+//      GIL-holding caller blocked on the mutex would deadlock against it.
+//   2. `body` therefore runs with the GIL released and must not touch any
+//      Python state — only ProgressState / Task fields.
+//   3. Defer the out-of-range error until the GIL is back: PyErr_SetString
+//      cannot be called from inside the Py_BEGIN/END_ALLOW_THREADS block.
+//
+// Returns true when `body` ran. Returns false with IndexError already set
+// when `task_id` is out of range, so callers just `return nullptr`.
+//
+// Deliberately NOT used by Progress_update (hot path: takes render_mtx with
+// the GIL still held when no CallbackColumn exists) or Progress_render_line
+// (re-Ensures the GIL inside the lock to run the column pipeline).
+template <typename F>
+static bool with_task_locked(ProgressState* st, long task_id, F&& body) {
+    bool oob = false;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        if (task_id < 0 ||
+            static_cast<size_t>(task_id) >= st->tasks.size()) {
+            oob = true;
+        } else {
+            body(*st->tasks[static_cast<size_t>(task_id)]);
+        }
+    }
+    Py_END_ALLOW_THREADS
+    if (oob) {
+        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        return false;
+    }
+    return true;
+}
+
 // set_total(task_id, total) — update an existing task's total. Takes
 // render_mtx because the render thread reads `task->total` under that
 // lock. Wakes the render cv so the next frame reflects the new total.
@@ -2381,24 +2412,8 @@ PyObject* Progress_set_total(PyProgress* self,
     if (PyErr_Occurred()) return nullptr;
     uint64_t total = 0;
     if (barflow_pylong_to_u64(args[1], &total) < 0) return nullptr;
-    // Drop the GIL around render_mtx: render_frame holds the lock while a
-    // CallbackColumn re-enters Python, so a GIL-holding caller blocked here
-    // would deadlock. Defer the out-of-range error until the GIL is back.
-    bool oob = false;
     auto* st = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
-        std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= st->tasks.size()) {
-            oob = true;
-        } else {
-            st->tasks[static_cast<size_t>(task_id)]->total = total;
-        }
-    }
-    Py_END_ALLOW_THREADS
-    if (oob) {
-        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+    if (!with_task_locked(st, task_id, [&](Task& t) { t.total = total; })) {
         return nullptr;
     }
     st->render_cv.notify_one();
@@ -2428,22 +2443,10 @@ PyObject* Progress_set_task_description(PyProgress* self,
     if (!ds) return nullptr;
     // ds points into args[1]'s cached UTF-8 buffer; args[1] is kept alive by
     // the caller and not mutated, so reading it with the GIL dropped is safe.
-    bool oob = false;
     auto* st = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
-        std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= st->tasks.size()) {
-            oob = true;
-        } else {
-            st->tasks[static_cast<size_t>(task_id)]->description.assign(
-                ds, static_cast<size_t>(dlen));
-        }
-    }
-    Py_END_ALLOW_THREADS
-    if (oob) {
-        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+    if (!with_task_locked(st, task_id, [&](Task& t) {
+            t.description.assign(ds, static_cast<size_t>(dlen));
+        })) {
         return nullptr;
     }
     st->render_cv.notify_one();
@@ -2501,22 +2504,10 @@ PyObject* Progress_set_postfix_str(PyProgress* self,
     if (!ps) return nullptr;
     // ps points into args[1]'s cached UTF-8 buffer (kept alive by the caller,
     // not mutated), so reading it with the GIL dropped is safe.
-    bool oob = false;
     auto* st = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
-        std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= st->tasks.size()) {
-            oob = true;
-        } else {
-            st->tasks[static_cast<size_t>(task_id)]->postfix.assign(
-                ps, static_cast<size_t>(plen));
-        }
-    }
-    Py_END_ALLOW_THREADS
-    if (oob) {
-        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+    if (!with_task_locked(st, task_id, [&](Task& t) {
+            t.postfix.assign(ps, static_cast<size_t>(plen));
+        })) {
         return nullptr;
     }
     st->render_cv.notify_one();
@@ -2538,24 +2529,13 @@ PyObject* Progress_set_visible(PyProgress* self,
     if (PyErr_Occurred()) return nullptr;
     int vis = PyObject_IsTrue(args[1]);
     if (vis < 0) return nullptr;
-    bool oob = false;
     auto* st = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
-        std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= st->tasks.size()) {
-            oob = true;
-        } else {
-            st->tasks[static_cast<size_t>(task_id)]->visible = (vis != 0);
+    if (!with_task_locked(st, task_id, [&](Task& t) {
+            t.visible = (vis != 0);
             // Row set changed: force a full repaint next frame.
             st->delta_valid  = false;
             st->force_render = true;
-        }
-    }
-    Py_END_ALLOW_THREADS
-    if (oob) {
-        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        })) {
         return nullptr;
     }
     st->render_cv.notify_one();
@@ -2583,39 +2563,27 @@ PyObject* Progress_reset(PyProgress* self, PyObject* args, PyObject* kwds) {
         set_total = true;
     }
     uint64_t tns = now_ns();
-    bool oob = false;
     auto* st = self->state;
-    Py_BEGIN_ALLOW_THREADS
-    {
-        std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
-            static_cast<size_t>(task_id) >= st->tasks.size()) {
-            oob = true;
-        } else {
-            Task* t = st->tasks[static_cast<size_t>(task_id)].get();
+    if (!with_task_locked(st, task_id, [&](Task& t) {
             // Zero the atomic counter and re-base every derived clock. Order
             // is immaterial: the render thread would only observe a coherent
             // pre- or post-reset snapshot under the same lock.
-            t->completed.store(0, std::memory_order_relaxed);
-            t->last_snapshot   = 0;
-            t->initial         = 0;   // fresh restart: no resume offset
-            t->start_time_ns   = tns;
-            t->finish_time_ns  = 0;
-            t->ema_primed      = false;
-            t->ema_rate        = 0.0;
-            t->ema_last_completed = 0;
-            t->ema_last_ns     = 0;
-            if (set_total) t->total = new_total;
+            t.completed.store(0, std::memory_order_relaxed);
+            t.last_snapshot   = 0;
+            t.initial         = 0;   // fresh restart: no resume offset
+            t.start_time_ns   = tns;
+            t.finish_time_ns  = 0;
+            t.ema_primed      = false;
+            t.ema_rate        = 0.0;
+            t.ema_last_completed = 0;
+            t.ema_last_ns     = 0;
+            if (set_total) t.total = new_total;
             // Force a repaint: zeroing both completed and last_snapshot makes
             // the render loop's `completed != last_snapshot` dirty check false,
             // so without this a spinner-less column set would keep showing the
             // pre-reset frame (e.g. "100/100") until the next advance().
             st->force_render = true;
-        }
-    }
-    Py_END_ALLOW_THREADS
-    if (oob) {
-        PyErr_SetString(PyExc_IndexError, "task_id out of range");
+        })) {
         return nullptr;
     }
     st->render_cv.notify_one();
@@ -2664,24 +2632,7 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
         // handles it.
         int term_w = query_terminal_width(st);
         if (!st->last_task_cells.empty() && st->vt_enabled) {
-            int total_rows = 0;
-            for (int c : st->last_task_cells) {
-                int r;
-                if (term_w > 0) {
-                    r = (c + term_w - 1) / term_w;
-                    if (r < 1) r = 1;
-                } else {
-                    r = 1;
-                }
-                total_rows += r;
-            }
-            if (total_rows > 0) {
-                buf.append("\x1b[", 2);
-                char tmp[20];
-                size_t n = u64_to_chars(tmp, static_cast<uint64_t>(total_rows));
-                buf.append(tmp, n);
-                buf.push_back('A');
-            }
+            append_cursor_up(buf, physical_rows(st->last_task_cells, term_w));
         }
         buf.push_back('\r');
         if (st->vt_enabled) buf.append("\x1b[J", 3);
@@ -2736,19 +2687,7 @@ PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
             buf.clear();
             int term_w = query_terminal_width(st);
             if (!st->last_task_cells.empty()) {
-                int total_rows = 0;
-                for (int c : st->last_task_cells) {
-                    int r = (term_w > 0) ? ((c + term_w - 1) / term_w) : 1;
-                    if (r < 1) r = 1;
-                    total_rows += r;
-                }
-                if (total_rows > 0) {
-                    buf.append("\x1b[", 2);
-                    char tmp[20];
-                    size_t n = u64_to_chars(tmp, static_cast<uint64_t>(total_rows));
-                    buf.append(tmp, n);
-                    buf.push_back('A');
-                }
+                append_cursor_up(buf, physical_rows(st->last_task_cells, term_w));
             }
             buf.push_back('\r');
             buf.append("\x1b[J", 3);   // erase from cursor to end of screen

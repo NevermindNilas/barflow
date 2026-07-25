@@ -946,7 +946,7 @@ def names() -> list[str]:
 __all__ = [
     "THEMES", "get", "names",
     # Utilitarian
-    "alive", "classic", "minimal", "rich", "rich_like", "spinner", "mono",
+    "alive", "classic", "minimal", "rich_like", "spinner", "mono",
     "ghost",
     # ASCII / legacy
     "ascii", "equals", "brackets",
@@ -954,8 +954,8 @@ __all__ = [
     "neon", "pastel", "retro", "matrix", "fire", "ocean", "ice", "sunset",
     "forest", "cyberpunk",
     # Playful / themed
-    "hearts", "stars", "arrows", "pacman", "pipes", "shade", "line",
-    "double", "round",
+    "hearts", "stars", "arrows_march", "pacman", "pipes", "shade_cool",
+    "line_clean", "double_frame", "round_retro",
     # Neon / synthwave
     "vaporwave", "synthwave", "lightning", "plasma", "acid", "midnight",
     "ember", "amber_crt", "miami", "gold_rush", "alien", "deep_sea", "magma",

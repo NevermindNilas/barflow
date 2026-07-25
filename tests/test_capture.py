@@ -29,14 +29,14 @@ class _RecordingProgress:
 
 def test_stream_emits_complete_lines_on_newline():
     fp = _RecordingProgress()
-    s = _ProgressStream(fp, sys.__stdout__, "stdout")
+    s = _ProgressStream(fp, sys.__stdout__)
     s.write("alpha\n")
     assert fp.lines == ["alpha\n"]
 
 
 def test_stream_holds_partial_until_newline():
     fp = _RecordingProgress()
-    s = _ProgressStream(fp, sys.__stdout__, "stdout")
+    s = _ProgressStream(fp, sys.__stdout__)
     s.write("no-newline-yet")
     assert fp.lines == []          # held — standard line buffering
     s.write(" rest\n")
@@ -46,7 +46,7 @@ def test_stream_holds_partial_until_newline():
 def test_drain_flushes_trailing_partial_line():
     # The regression: a final print(end="") must not be lost on teardown.
     fp = _RecordingProgress()
-    s = _ProgressStream(fp, sys.__stdout__, "stdout")
+    s = _ProgressStream(fp, sys.__stdout__)
     s.write("tail-without-newline")
     s.drain()
     assert "tail-without-newline" in "".join(fp.lines)
@@ -54,7 +54,7 @@ def test_drain_flushes_trailing_partial_line():
 
 def test_drain_is_noop_when_empty():
     fp = _RecordingProgress()
-    s = _ProgressStream(fp, sys.__stdout__, "stdout")
+    s = _ProgressStream(fp, sys.__stdout__)
     s.drain()
     assert fp.lines == []
 

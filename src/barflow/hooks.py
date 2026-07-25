@@ -24,11 +24,10 @@ from typing import TextIO
 class _ProgressStream:
     """A thin text stream that forwards writes to a Progress's write_above."""
 
-    def __init__(self, progress, original: TextIO, name: str):
+    def __init__(self, progress, original: TextIO):
         self._progress = progress
         self._orig = original
         self._buf: list[str] = []
-        self._name = name
         # Cache hot stream attrs as real instance attrs so user code that
         # reads `sys.stdout.encoding` / `.errors` / etc. doesn't fall through
         # our __getattr__. The wrapped stream is stable for the lifetime of
@@ -114,11 +113,11 @@ class StdoutCapture:
     def install(self):
         if self._cap_out:
             self._saved_out = sys.stdout
-            self._proxy_out = _ProgressStream(self._progress, self._saved_out, "stdout")
+            self._proxy_out = _ProgressStream(self._progress, self._saved_out)
             sys.stdout = self._proxy_out
         if self._cap_err:
             self._saved_err = sys.stderr
-            self._proxy_err = _ProgressStream(self._progress, self._saved_err, "stderr")
+            self._proxy_err = _ProgressStream(self._progress, self._saved_err)
             sys.stderr = self._proxy_err
 
     def uninstall(self):

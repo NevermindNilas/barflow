@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from ._core import Progress as _CoreProgress
+from . import _build_progress
 
 
 class _AsyncTracker:
@@ -85,38 +85,11 @@ def atrack(aiterable, total=None, desc=None, *, columns=None, theme=None,
         except TypeError:
             total = 0
 
-    if columns or theme or capture_output:
-        from . import _progress
-        p = _progress.Progress(
-            *(columns or ()),
-            total=total,
-            desc=desc,
-            theme=theme,
-            disable=disable,
-            min_interval=min_interval,
-            capture_output=capture_output,
-            smoothing=smoothing,
-            leave=leave,
-            unit=unit,
-            unit_scale=unit_scale,
-            unit_divisor=unit_divisor,
-            initial=initial,
-            delay=delay,
-        )
-    else:
-        p = _CoreProgress(
-            total=total,
-            desc=desc,
-            min_interval=min_interval,
-            disable=disable,
-            smoothing=smoothing,
-            leave=leave,
-            unit=unit,
-            unit_scale=unit_scale,
-            unit_divisor=float(unit_divisor),
-            initial=initial,
-            delay=delay,
-        )
+    # Shared with track(): same fast/slow dispatch, one source of truth.
+    p = _build_progress(
+        total, desc, columns, theme, disable, min_interval, capture_output,
+        smoothing, leave, unit, unit_scale, unit_divisor, initial, delay,
+    )
 
     p.__enter__()
     if hasattr(aiterable, "__aiter__"):
