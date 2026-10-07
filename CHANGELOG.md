@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-07
+
+### Fixed
+
+- **Shrinking the terminal mid-run left stale bar frames behind.** Before each
+  frame the bar walked back over the previous one by predicting how many rows
+  it had re-wrapped into at the new width (`ceil(cells / width)`). During a
+  drag-resize, especially in Windows Terminal, where the console's reported
+  width lags the window, that prediction went stale. An undercount stranded
+  old frames above the bar for good, and an overcount erased a line above it.
+  The bar no longer predicts the row count. Each frame is drawn with autowrap
+  off, so every task line takes exactly one row. The cursor is then parked,
+  hidden, at column 0 of the bar's top row, which a resize reflow never
+  moves. The next frame, `write_above()`, `pause()` and close all clear with
+  `\r\x1b[J` from there. The cursor is shown again on `write_above()`,
+  `pause()` and close.
+
+### Changed
+
+- **A fixed-width bar now shrinks to fit a narrow terminal instead of
+  wrapping the line.** Fixed bars include the default layout's 40-cell bar.
+  This uses the same collapse rules flex bars already had: shrink the bar
+  body, then hide the bar, then drop columns from the right, then truncate the
+  description. A fixed bar never grows past its configured width, so the
+  layout looks the same whenever it fits. As a result, the default bar in an
+  80-column terminal stays on one row and keeps its count and ETA. A line
+  that still doesn't fit is clipped at the right edge rather than wrapped.
+  That covers layouts with no bar column, and the moment before a resize is
+  picked up.
+
 ### Removed
 
 - **Free-threaded CPython 3.13 (`cp313t`) wheels.** Dropped from the build
@@ -424,7 +454,8 @@ Initial public release.
   (x86_64 + arm64), and Linux (manylinux_2_28 + musllinux_1_2,
   x86_64 + aarch64). Source distribution published alongside.
 
-[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/NevermindNilas/barflow/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/NevermindNilas/barflow/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/NevermindNilas/barflow/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/NevermindNilas/barflow/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/NevermindNilas/barflow/compare/v0.4.0...v0.4.1
