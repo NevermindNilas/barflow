@@ -274,11 +274,14 @@ struct ProgressState {
     // Cached column-pipeline flags. Filled once after parse_columns /
     // install_default_columns (single-threaded init); read by the render
     // thread on every wakeup to avoid re-scanning `columns` on each tick.
-    // `flex_bar_idx` is the column index of the first flex bar (-1 if
-    // none) — render_frame uses it directly instead of re-scanning.
+    // `fit_bar_idx` is the column index of the bar render_frame fits to
+    // the terminal width (-1 if none): the first flex bar, else the first
+    // bar. `fit_bar_grows` is true for a flex bar, which grows to fill the
+    // width; a fixed bar only shrinks below its configured width.
     bool has_spinner_col{false};
     bool has_callback_col{false};
-    int  flex_bar_idx{-1};
+    int  fit_bar_idx{-1};
+    bool fit_bar_grows{false};
 
     // Stable pointer to task[0] for the lock-free hot path. Set on first
     // task creation, never reassigned. Task lives in unique_ptr on the
@@ -333,13 +336,15 @@ struct ProgressState {
     int      last_rendered_lines{0};
     uint64_t frame_tick{0};
 
-    // Cell count of each visible task's rendered content in the
-    // previous frame. Used on the next frame to compute how many
-    // physical rows the terminal actually consumed *at the current
-    // width*, so a live resize (which re-wraps already-written lines)
-    // can be cleaned up before painting the new frame. Cleared by
-    // write_above and on close.
-    std::vector<int> last_task_cells;
+    // True while a painted bar area is on screen with the cursor parked at
+    // column 0 of its top row (see render_frame). Column 0 of a line's first
+    // row is the one position a terminal's resize reflow never moves, so
+    // every eraser (next frame, write_above, pause, close) starts with
+    // "\r\x1b[J" from there instead of predicting how many rows the old
+    // frame re-wrapped into at the new width — a prediction that goes stale
+    // mid-drag and strands old frames above the bar. Cleared by write_above,
+    // pause and close.
+    bool parked{false};
 
     std::string scratch;   // reusable per-frame render buffer
     // Per-column staging strings reused across frames; sized to
@@ -605,9 +610,9 @@ struct RenderCtx {
     // then shared across every COL_CALLBACK in that frame. nullptr when
     // no callback columns exist, or when GIL acquisition failed.
     PyObject* snapshot;
-    // Flex bar width override. -1 = ignore, use col.width. >=0 = use
-    // this body width for flex bars (computed after measuring non-bar
-    // columns against the terminal width).
+    // Fitted bar width override. -1 = ignore, use col.width. >=0 = use
+    // this body width (computed after measuring non-bar columns against
+    // the terminal width; never above col.width for a fixed bar).
     int       bar_width_override;
     // Alignment: when >0, COL_DESCRIPTION right-pads with spaces to this
     // many display cells (the widest description across all tasks this
@@ -842,7 +847,10 @@ void render_column(const Column& col, const Task& t,
     case COL_BAR: {
         buf.append(col.left_border);
         int bar_w;
-        if (col.flex && ctx.bar_width_override >= 0) {
+        if (ctx.bar_width_override >= 0) {
+            // Set only for the bar render_frame fits to the terminal. A
+            // fixed bar is only ever shrunk, so its cache below (sized for
+            // `col.width`) still covers it.
             bar_w = ctx.bar_width_override;
         } else {
             bar_w = col.width > 0 ? col.width : 40;
@@ -1107,18 +1115,20 @@ static PyObject* build_task_snapshot(const Task& t, const RenderCtx& ctx) {
 // read them on every wakeup without re-scanning the column list.
 static void refresh_column_flags(ProgressState* st) {
     bool spinner = false, callback = false;
-    int  flex_idx = -1;
+    int  flex_idx = -1, bar_idx = -1;
     for (size_t ci = 0; ci < st->columns.size(); ++ci) {
         const auto& c = st->columns[ci];
         if (c.type == COL_SPINNER)  spinner = true;
         if (c.type == COL_CALLBACK) callback = true;
-        if (c.type == COL_BAR && c.flex && flex_idx < 0) {
-            flex_idx = static_cast<int>(ci);
+        if (c.type == COL_BAR) {
+            if (bar_idx < 0) bar_idx = static_cast<int>(ci);
+            if (c.flex && flex_idx < 0) flex_idx = static_cast<int>(ci);
         }
     }
     st->has_spinner_col  = spinner;
     st->has_callback_col = callback;
-    st->flex_bar_idx     = flex_idx;
+    st->fit_bar_idx      = flex_idx >= 0 ? flex_idx : bar_idx;
+    st->fit_bar_grows    = flex_idx >= 0;
 }
 
 void install_default_columns(ProgressState* st) {
@@ -1201,21 +1211,6 @@ static inline void append_cursor_up(std::string& buf, int n) {
     buf.push_back('A');
 }
 
-// How many physical terminal rows the given per-task cell counts occupy at
-// `term_w` columns. Terminals soft-wrap already-written content, so a task
-// that printed one line at 120 columns spans three rows at 40. A width of 0
-// means "unknown" (pipe/redirect) and falls back to one row per task.
-// Every row count is floored at 1 so an empty task line still owns a row.
-static int physical_rows(const std::vector<int>& task_cells, int term_w) {
-    int total = 0;
-    for (int c : task_cells) {
-        int r = term_w > 0 ? (c + term_w - 1) / term_w : 1;
-        if (r < 1) r = 1;
-        total += r;
-    }
-    return total;
-}
-
 // Minimum bytes-saved threshold below which we just re-emit the
 // column's bytes instead of a cursor-right escape. A CUF escape is
 // 4-6 bytes (\x1b[N..C); emitting it for a column whose output is
@@ -1261,29 +1256,32 @@ static inline double compute_rate(ProgressState* st, Task& task,
     return task.ema_rate;
 }
 
-void render_frame(ProgressState* st) {
+// Paint one frame. Every task line is written with autowrap (DECAWM) off,
+// so it occupies exactly one row at whatever width the terminal really has
+// when the bytes arrive (a line fitted to a stale, wider measurement is
+// clipped instead of wrapping). With `park`, the cursor is then returned to
+// column 0 of the frame's top row and hidden there; the close path passes
+// false so the final frame leaves the cursor at its end for the newline.
+void render_frame(ProgressState* st, bool park = true) {
     if (st->tasks.empty() || st->columns.empty()) return;
 
     std::string& buf = st->scratch;
     buf.clear();
 
     // Pull cached column-pipeline flags (computed once at column setup).
-    // `has_callback` controls GIL acquisition; `flex_bar_idx` selects the
-    // two-stage flex render path; `has_spinner_col` is reserved for the
+    // `has_callback` controls GIL acquisition; `fit_bar_idx` selects the
+    // two-stage fit-to-width render path; `has_spinner_col` is reserved for the
     // dirty-skip heuristic that lives in render_loop.
     const bool has_callback = st->has_callback_col;
-    const int  flex_bar_idx = st->flex_bar_idx;
+    const int  fit_bar_idx = st->fit_bar_idx;
     PyGILState_STATE gil_state{};
     if (has_callback) {
         gil_state = PyGILState_Ensure();
     }
 
-    // Terminal width is queried for BOTH paths now — the non-flex path
-    // still needs it to compute how many physical rows the previous
-    // frame currently occupies (the terminal re-wraps already-written
-    // content on resize, so a task that printed 1 row at 120 columns
-    // may now span 3 rows at 40). 0 means "unknown" (pipe/redirect) —
-    // we fall back to the old "1 row per task" assumption.
+    // Terminal width: the flex path fits each line to it, and a change
+    // since the last frame disables the delta path below. 0 means
+    // "unknown" (pipe/redirect).
     int term_w = query_terminal_width(st);
 
     // Decide delta-render eligibility *before* the walk-back. Delta emit
@@ -1314,50 +1312,18 @@ void render_frame(ProgressState* st) {
         }
     }
 
-    // Walk the cursor back to the top of the previous bar area. On the
-    // non-delta path we *also* erase every physical row it used to
-    // occupy; on the delta path we leave the old bytes in place so the
-    // CUF skips downstream land on the right characters. Physical rows
-    // are computed against the *current* terminal width because
-    // terminals soft-wrap already-written content on resize — a task
-    // that printed one line at 120 cols now spans three rows at 40.
-    //
-    // Per-row \x1b[2K beats \x1b[J for erasing: Erase-in-Display's
-    // semantics vary with the scrollback / buffer state (the bar
-    // area commonly straddles the last visible row) and in practice
-    // leaves the top of the old bar area behind on Windows Terminal
-    // after a resize. \x1b[1B / \x1b[1A move between rows without
-    // ever emitting \n, which avoids a scroll if the bar area is
-    // sitting against the bottom edge of the viewport.
-    if (!st->last_task_cells.empty() && st->vt_enabled) {
-        int total_rows = physical_rows(st->last_task_cells, term_w);
-        // Overshoot by one — cheap insurance against an off-by-one in
-        // cells_per_task (e.g. a callback column emitted a glyph the
-        // terminal treats as 2 cells but we counted as 1).
-        int clear_rows = total_rows + 1;
-        int rows_up    = total_rows > 0 ? total_rows - 1 : 0;
-
-        append_cursor_up(buf, rows_up);
-        buf.push_back('\r');
-
-        if (!use_delta) {
-            for (int i = 0; i < clear_rows; ++i) {
-                buf.append("\x1b[2K", 4);       // erase entire current row
-                if (i < clear_rows - 1) {
-                    buf.append("\x1b[1B", 4);   // down one row, no scroll
-                }
-            }
-            // Walk back to the top of the now-empty bar area.
-            append_cursor_up(buf, clear_rows - 1);
-            buf.push_back('\r');
-        }
-    } else {
-        buf.push_back('\r');
+    // Return to the top of the bar area. A previous frame parked the cursor
+    // at column 0 of its top row, which a resize reflow leaves in place
+    // however the old rows re-wrapped, so no row arithmetic is needed:
+    // the non-delta path clears from there to the end of the screen,
+    // taking any rows the reflow spilled the old frame into with it. The
+    // delta path leaves the old bytes so its CUF skips land on them.
+    // DECAWM off (\x1b[?7l) for the frame body: see the comment above.
+    buf.push_back('\r');
+    if (st->vt_enabled) {
+        if (st->parked && !use_delta) buf.append("\x1b[J", 3);
+        buf.append("\x1b[?7l", 5);
     }
-
-    // Previous frame's per-task cells are no longer needed; reuse the
-    // vector in place as we render this frame.
-    st->last_task_cells.clear();
 
     // Per-column output staging. Reused across tasks and frames so the
     // allocator sees the same size-class after a few frames. With the
@@ -1451,8 +1417,8 @@ void render_frame(ProgressState* st) {
         if (this_cells.size() != ncols) this_cells.resize(ncols);
         std::fill(this_cells.begin(), this_cells.end(), 0);
 
-        if (flex_bar_idx < 0) {
-            // Non-flex: render every column into its col_out[] slot and
+        if (fit_bar_idx < 0) {
+            // No bar to fit: render every column into its col_out[] slot and
             // measure its cell width in the same pass. On frames where
             // everything changed, the downstream emit-loop just appends
             // col_out[ci] straight into buf — net cost is one extra
@@ -1463,8 +1429,8 @@ void render_frame(ProgressState* st) {
                 this_cells[ci] = count_display_cells(col_out[ci]);
             }
         } else {
-            // Flex path — progressive collapse so that a resize into a
-            // narrow window never wraps the line:
+            // Fit path (flex or fixed bar) — progressive collapse so that
+            // a resize into a narrow window never wraps the line:
             //   1. Shrink the bar body down to `body_min` cells.
             //   2. If that still doesn't fit, hide the bar entirely
             //      (body + borders).
@@ -1479,29 +1445,33 @@ void render_frame(ProgressState* st) {
             int sum_non_bar = 0;
             for (int ci = 0; ci < N; ++ci) {
                 col_out[ci].clear();
-                if (ci == flex_bar_idx) continue;
+                if (ci == fit_bar_idx) continue;
                 render_column(st->columns[ci], *task, col_out[ci], ctx);
                 this_cells[ci] = count_display_cells(col_out[ci]);
                 sum_non_bar += this_cells[ci];
             }
 
-            // Plan: decide body_w and which columns stay visible.
-            int body_w = st->columns[flex_bar_idx].width > 0
-                         ? st->columns[flex_bar_idx].width : 40;
+            // Plan: decide body_w and which columns stay visible. A flex
+            // bar grows to fill the width; a fixed bar keeps its configured
+            // width unless the line would overflow, then shrinks like flex.
+            const int cfg_w = st->columns[fit_bar_idx].width > 0
+                              ? st->columns[fit_bar_idx].width : 40;
+            const int max_w = st->fit_bar_grows ? 400 : cfg_w;
+            int body_w = cfg_w;
             bool hide_bar = false;
             const int border_cells = 2;  // left + right bar borders
-            const int body_min     = 5;  // smallest "useful" bar body
+            const int body_min     = std::min(5, max_w);  // smallest "useful" body
 
             if (term_w > 0) {
                 const int safety = 1;
                 int budget_for_bar = term_w - sum_non_bar - safety;
                 if (budget_for_bar >= border_cells + body_min) {
                     body_w = budget_for_bar - border_cells;
-                    if (body_w > 400) body_w = 400;
+                    if (body_w > max_w) body_w = max_w;
                 } else {
                     // Step 2: hide the bar.
                     hide_bar = true;
-                    visible_cols[flex_bar_idx] = 0;
+                    visible_cols[fit_bar_idx] = 0;
 
                     // The leftmost non-bar column with content is the
                     // "anchor" — typically the task description. We
@@ -1509,7 +1479,7 @@ void render_frame(ProgressState* st) {
                     // terminal width, we truncate it instead.
                     int anchor = -1;
                     for (int ci = 0; ci < N; ++ci) {
-                        if (ci != flex_bar_idx && this_cells[ci] > 0) {
+                        if (ci != fit_bar_idx && this_cells[ci] > 0) {
                             anchor = ci;
                             break;
                         }
@@ -1522,7 +1492,7 @@ void render_frame(ProgressState* st) {
                     int available = term_w;
                     int cum = sum_non_bar;
                     for (int ci = N - 1; ci > anchor && cum > available; --ci) {
-                        if (ci == flex_bar_idx) continue;
+                        if (ci == fit_bar_idx) continue;
                         if (this_cells[ci] == 0) { visible_cols[ci] = 0; continue; }
                         cum -= this_cells[ci];
                         visible_cols[ci] = 0;
@@ -1553,10 +1523,10 @@ void render_frame(ProgressState* st) {
             // patch its cell width into the per-column table.
             if (!hide_bar) {
                 ctx.bar_width_override = body_w;
-                render_column(st->columns[flex_bar_idx], *task,
-                              col_out[flex_bar_idx], ctx);
+                render_column(st->columns[fit_bar_idx], *task,
+                              col_out[fit_bar_idx], ctx);
                 ctx.bar_width_override = -1;
-                this_cells[flex_bar_idx] = count_display_cells(col_out[flex_bar_idx]);
+                this_cells[fit_bar_idx] = count_display_cells(col_out[fit_bar_idx]);
             }
         }
 
@@ -1650,35 +1620,6 @@ void render_frame(ProgressState* st) {
             // clears only rightward, so already-emitted columns are safe.
             if (st->vt_enabled) {
                 buf.append("\x1b[K", 3);
-                // EL0 clears only the current physical row's tail. If this
-                // line wrapped across multiple rows last frame and shrank to
-                // fewer rows now, the surplus old wrapped row(s) below are
-                // left on screen — and once last_task_cells shrinks the next
-                // frame's cursor-up walk won't reach them, making the stale
-                // rows permanent. Erase each surplus row, then walk back up
-                // (vertical moves preserve the column) so the cursor stays at
-                // the end of this row's content for the downstream newline.
-                if (term_w > 0) {
-                    int cur_total = 0, prev_total = 0;
-                    for (size_t ci = 0; ci < ncols; ++ci) {
-                        if (!visible_cols[ci]) continue;
-                        cur_total  += this_cells[ci];
-                        prev_total += prev_cells[ci];
-                    }
-                    int cur_rows  = (cur_total  + term_w - 1) / term_w;
-                    int prev_rows = (prev_total + term_w - 1) / term_w;
-                    if (cur_rows  < 1) cur_rows  = 1;
-                    if (prev_rows < 1) prev_rows = 1;
-                    if (prev_rows > cur_rows) {
-                        int surplus = prev_rows - cur_rows;
-                        for (int k = 0; k < surplus; ++k) {
-                            buf.append("\x1b[1B", 4);   // down one row, no scroll
-                            buf.append("\x1b[2K", 4);   // erase that stale row
-                        }
-                        // Walk back up to the content row.
-                        append_cursor_up(buf, surplus);
-                    }
-                }
             }
         } else {
             // Full emit: concatenate every visible column's bytes.
@@ -1707,18 +1648,6 @@ void render_frame(ProgressState* st) {
             prev_vis[ci]   = static_cast<uint8_t>(visible_cols[ci]);
         }
 
-        // Measure the task line's cell footprint. Delta-emitted lines
-        // may contain CUF escapes which count_display_cells skips over
-        // correctly (it treats CSI as zero-width), BUT CUF only moves
-        // the cursor — it doesn't add cells. The skipped bytes were
-        // already on screen from last frame, so the line still occupies
-        // the sum of cells across visible columns.
-        int task_cells_total = 0;
-        for (size_t ci = 0; ci < ncols; ++ci) {
-            if (visible_cols[ci]) task_cells_total += this_cells[ci];
-        }
-        st->last_task_cells.push_back(task_cells_total);
-
         if (ctx.snapshot) Py_DECREF(ctx.snapshot);
         visible++;
     }
@@ -1734,6 +1663,20 @@ void render_frame(ProgressState* st) {
     // between now and the next render invalidates the cache.
     st->delta_valid = true;
     st->prev_term_w = term_w;
+    if (st->vt_enabled) {
+        buf.append("\x1b[?7h", 5);   // autowrap back on for everyone else
+        if (park) {
+            // Park at column 0 of the top row. Every line above was one row
+            // (autowrap was off), so the climb is exact. Hide the cursor
+            // while parked: it would otherwise blink over the first glyph.
+            buf.push_back('\r');
+            append_cursor_up(buf, visible - 1);
+            buf.append("\x1b[?25l", 6);
+        } else {
+            buf.append("\x1b[?25h", 6);
+        }
+        st->parked = park;
+    }
     write_bytes(st, buf.data(), buf.size());
 }
 
@@ -1793,25 +1736,18 @@ void render_loop(ProgressState* st) {
     bool never_shown = (st->delay > 0.0 && !st->shown);
     if (!never_shown && !st->paused.load(std::memory_order_acquire)) {
         if (st->leave) {
-            render_frame(st);
+            // Unparked final frame: the cursor stays at its end, so the
+            // newline lands below the bar and the cursor is shown again.
+            render_frame(st, /*park=*/false);
             if (st->vt_enabled || st->is_console) write_bytes(st, "\n", 1);
         } else {
             // leave=false: ephemeral bar. Erase the bar area the loop last
-            // painted (walk up its physical rows at the current width, clear
-            // to end of screen) leaving the cursor at column 0 — nothing
-            // lingers. No final render_frame: repainting just to wipe it would
-            // flicker, and last_task_cells already describes what's on screen
-            // (primed by __enter__'s synchronous first frame at minimum).
-            if (st->vt_enabled && !st->last_task_cells.empty()) {
-                std::string& buf = st->scratch;
-                buf.clear();
-                int term_w = query_terminal_width(st);
-                int total_rows = physical_rows(st->last_task_cells, term_w);
-                append_cursor_up(buf, total_rows - 1);
-                buf.push_back('\r');
-                buf.append("\x1b[J", 3);   // erase from cursor to end of screen
-                write_bytes(st, buf.data(), buf.size());
-                st->last_task_cells.clear();
+            // painted from its parked top-left anchor, leaving the cursor
+            // (shown again) at column 0 — nothing lingers. No final
+            // render_frame: repainting just to wipe it would flicker.
+            if (st->vt_enabled && st->parked) {
+                write_bytes(st, "\r\x1b[J\x1b[?25h", 10);
+                st->parked = false;
             }
         }
     }
@@ -2626,16 +2562,11 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
         std::string& buf = st->scratch;
         buf.clear();
 
-        // Walk up through whatever physical rows the previous bar area
-        // currently occupies at the *current* terminal width so a live
-        // resize between frames is handled the same way render_frame
-        // handles it.
-        int term_w = query_terminal_width(st);
-        if (!st->last_task_cells.empty() && st->vt_enabled) {
-            append_cursor_up(buf, physical_rows(st->last_task_cells, term_w));
-        }
+        // The cursor is parked at the bar area's top-left (or, with no bar
+        // painted, at column 0 of a fresh row): clear from there down and
+        // write the text in its place, cursor shown again.
         buf.push_back('\r');
-        if (st->vt_enabled) buf.append("\x1b[J", 3);
+        if (st->vt_enabled) buf.append("\x1b[J\x1b[?25h", 9);
         buf.append(text, static_cast<size_t>(len));
         // Ensure the emitted text ends with a CRLF so the cursor returns
         // to column 0 on Windows (where LF alone doesn't auto-CR when
@@ -2648,7 +2579,7 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
         }
         write_bytes(st, buf.data(), buf.size());
         st->last_rendered_lines = 0;
-        st->last_task_cells.clear();
+        st->parked = false;
         // write_above moved the cursor and emitted unrelated content
         // on what used to be the bar area. The delta cache describes
         // bytes that are no longer on screen where it thinks they are
@@ -2662,8 +2593,8 @@ PyObject* Progress_write_above(PyProgress* self, PyObject* text_obj) {
 
 // pause() — suspend the render thread and erase the bar area, leaving the
 // cursor at column 0 of the cleared region so an external writer can emit
-// lines there without the bar repainting on top. Mirrors the walk-back +
-// erase that write_above performs. Idempotent and safe to call when the bar
+// lines there without the bar repainting on top. Same anchored erase as
+// write_above. Idempotent and safe to call when the bar
 // is disabled or closed (no-op). Pairs with resume().
 PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
     auto* st = self->state;
@@ -2683,17 +2614,11 @@ PyObject* Progress_pause(PyProgress* self, PyObject* /*args*/) {
         st->paused.store(true, std::memory_order_release);
 
         if (st->vt_enabled) {
-            std::string& buf = st->scratch;
-            buf.clear();
-            int term_w = query_terminal_width(st);
-            if (!st->last_task_cells.empty()) {
-                append_cursor_up(buf, physical_rows(st->last_task_cells, term_w));
-            }
-            buf.push_back('\r');
-            buf.append("\x1b[J", 3);   // erase from cursor to end of screen
-            write_bytes(st, buf.data(), buf.size());
+            // From the parked top-left anchor: erase to end of screen and
+            // show the cursor for the external writer.
+            write_bytes(st, "\r\x1b[J\x1b[?25h", 10);
             st->last_rendered_lines = 0;
-            st->last_task_cells.clear();
+            st->parked = false;
             st->delta_valid = false;   // resume repaints from scratch
         }
     }

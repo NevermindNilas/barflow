@@ -61,6 +61,8 @@ def BarColumn(width=40, *, style="cyan", color=None, glyphs="smooth", tip=None):
     """A progress bar with customizable glyphs and style.
 
     `width`   character width of the bar body (excludes borders). 40.
+              A fixed width is a maximum: in a terminal too narrow
+              for the line, the bar shrinks (or hides) to fit.
               Pass `None` to flex to the terminal width — the column
               claims whatever cells remain after every other column
               has rendered, re-measured on each frame. Falls back to
