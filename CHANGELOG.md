@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-16
+
+### Fixed
+
+- **`Progress(total=None)` could not be updated once the total was known.**
+  With no total the constructor created no task at all, so it dropped
+  `desc=` and `initial=`, `advance()` / `tick()` did nothing, and
+  `set_total(0, n)`, `update(0, n)`, `set_postfix_str(0, ...)` and
+  `set_description()` raised `IndexError`. Callers had to pass `total=0`
+  instead. Task 0 is now implicit: the first call that targets it creates it
+  from the constructor's `desc=` and `initial=`, with an unknown total that a
+  later `set_total` fills in, the same as tqdm's `total=None`. `Progress()`
+  used as a container for `add_task()` is unchanged. The first `add_task()`
+  still returns id 0, and other task ids still raise `IndexError` until they
+  are added.
+
 ## [0.6.0] — 2026-10-07
 
 ### Fixed
