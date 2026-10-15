@@ -32,10 +32,7 @@ def wrap_file(fileobj, *, total=None, desc=None, disable=None, leave=True,
            AttributeError/io.UnsupportedOperation and treat as unknown.
     disable: None => auto (disable when sys.stderr is not a tty).
     """
-    # Always hand the core a concrete int: advance() is a silent no-op unless
-    # task 0 exists, and task 0 is only materialized when total is not None.
-    # So an indeterminate stream must still pass total=0 (creates a bounded-by-
-    # zero == unbounded task) rather than None, or nothing would ever count.
+    # Hand the core a concrete int: total=0 is the indeterminate bar.
     if total is None:
         total = _infer_total(fileobj)
     if disable is None:

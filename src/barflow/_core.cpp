@@ -288,6 +288,14 @@ struct ProgressState {
     // heap so the pointer is stable across vector reallocations.
     std::atomic<Task*>      task0{nullptr};
 
+    // Constructor `desc=` / `initial=` for task 0 when `total=None` deferred
+    // its creation. Task 0 is implicit: the first call that targets it
+    // (advance, set_total(0, n), ...) builds it from these, so a bar whose
+    // total is only learned later works like tqdm's `total=None`. Written
+    // once in init, read under render_mtx by materialize_task0_locked.
+    std::string             task0_desc;
+    uint64_t                task0_initial{0};
+
     std::mutex              render_mtx;
     std::condition_variable render_cv;
     std::atomic<bool>       running{false};
@@ -404,6 +412,26 @@ inline uint64_t now_ns() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// Return task 0, creating it first if no task exists yet (the `total=None`
+// constructor path, which leaves its desc/initial in task0_desc/initial).
+// Caller holds render_mtx; touches no Python state, so the GIL may be
+// released. Unknown total is 0, the same as `total=0` (indeterminate).
+Task* materialize_task0_locked(ProgressState* st) {
+    if (st->tasks.empty()) {
+        auto task = std::make_unique<Task>();
+        task->start_time_ns = now_ns();
+        task->description = st->task0_desc;
+        task->id = 0;
+        if (st->task0_initial > 0) {
+            task->initial = st->task0_initial;
+            task->completed.store(st->task0_initial, std::memory_order_relaxed);
+        }
+        st->task0.store(task.get(), std::memory_order_release);
+        st->tasks.push_back(std::move(task));
+    }
+    return st->tasks[0].get();
 }
 
 // -------- Console init / write primitives --------
@@ -2026,6 +2054,11 @@ int Progress_init(PyProgress* self, PyObject* args, PyObject* kwds) {
         // semantics so the hot path's acquire load sees a fully-built Task.
         self->state->task0.store(task.get(), std::memory_order_release);
         self->state->tasks.push_back(std::move(task));
+    } else {
+        // Defer task 0 until something targets it (materialize_task0_locked),
+        // so `Progress()` stays an empty container for add_task().
+        if (desc) self->state->task0_desc = desc;
+        self->state->task0_initial = static_cast<uint64_t>(initial);
     }
     return 0;
 }
@@ -2120,13 +2153,25 @@ PyObject* Progress_close(PyProgress* self, PyObject* /*args*/) {
     return Progress_close_impl(self);
 }
 
+// Cold path of tick/advance/iternext: task 0 does not exist yet (total=None),
+// so create it. Drops the GIL before render_mtx (see set_total).
+static Task* materialize_task0(ProgressState* st) {
+    Task* t;
+    Py_BEGIN_ALLOW_THREADS
+    {
+        std::lock_guard<std::mutex> lg(st->render_mtx);
+        t = materialize_task0_locked(st);
+    }
+    Py_END_ALLOW_THREADS
+    return t;
+}
+
 // Hot path: METH_NOARGS +1 on task 0. Lock-free, free-thread safe:
 // only touches the cached task0 pointer and its atomic counter.
 PyObject* Progress_tick(PyProgress* self, PyObject* /*arg*/) {
     Task* t = self->state->task0.load(std::memory_order_acquire);
-    if (BARFLOW_LIKELY(t != nullptr)) {
-        t->completed.fetch_add(1, std::memory_order_relaxed);
-    }
+    if (BARFLOW_UNLIKELY(t == nullptr)) t = materialize_task0(self->state);
+    t->completed.fetch_add(1, std::memory_order_relaxed);
     Py_RETURN_NONE;
 }
 
@@ -2144,14 +2189,13 @@ PyObject* Progress_iter(PyObject* self) {
 
 PyObject* Progress_iternext(PyProgress* self) {
     Task* t = self->state->task0.load(std::memory_order_acquire);
-    if (BARFLOW_LIKELY(t != nullptr)) {
-        uint64_t prev = t->completed.fetch_add(1, std::memory_order_relaxed);
-        if (BARFLOW_UNLIKELY(t->total > 0 && prev >= t->total)) {
-            // Over-incremented past total — roll back so the final counter
-            // reads exactly `total`, then signal end-of-iteration.
-            t->completed.fetch_sub(1, std::memory_order_relaxed);
-            return nullptr;
-        }
+    if (BARFLOW_UNLIKELY(t == nullptr)) t = materialize_task0(self->state);
+    uint64_t prev = t->completed.fetch_add(1, std::memory_order_relaxed);
+    if (BARFLOW_UNLIKELY(t->total > 0 && prev >= t->total)) {
+        // Over-incremented past total — roll back so the final counter
+        // reads exactly `total`, then signal end-of-iteration.
+        t->completed.fetch_sub(1, std::memory_order_relaxed);
+        return nullptr;
     }
     Py_RETURN_NONE;
 }
@@ -2193,9 +2237,8 @@ PyObject* Progress_advance(PyProgress* self,
         }
     }
     Task* t = self->state->task0.load(std::memory_order_acquire);
-    if (BARFLOW_LIKELY(t != nullptr)) {
-        t->completed.fetch_add(n, std::memory_order_relaxed);
-    }
+    if (BARFLOW_UNLIKELY(t == nullptr)) t = materialize_task0(self->state);
+    t->completed.fetch_add(n, std::memory_order_relaxed);
     Py_RETURN_NONE;
 }
 
@@ -2222,7 +2265,9 @@ PyObject* Progress_update(PyProgress* self,
     auto* st     = self->state;
     auto resolve = [&]() {
         std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
+        if (task_id == 0) {
+            target = materialize_task0_locked(st);
+        } else if (task_id < 0 ||
             static_cast<size_t>(task_id) >= st->tasks.size()) {
             oob = true;
         } else {
@@ -2307,6 +2352,9 @@ PyObject* Progress_add_task(PyProgress* self, PyObject* args, PyObject* kwds) {
 //   3. Defer the out-of-range error until the GIL is back: PyErr_SetString
 //      cannot be called from inside the Py_BEGIN/END_ALLOW_THREADS block.
 //
+// Task 0 is implicit: when no task exists yet (total=None), targeting it
+// creates it via materialize_task0_locked instead of raising.
+//
 // Returns true when `body` ran. Returns false with IndexError already set
 // when `task_id` is out of range, so callers just `return nullptr`.
 //
@@ -2319,7 +2367,9 @@ static bool with_task_locked(ProgressState* st, long task_id, F&& body) {
     Py_BEGIN_ALLOW_THREADS
     {
         std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (task_id < 0 ||
+        if (task_id == 0) {
+            body(*materialize_task0_locked(st));
+        } else if (task_id < 0 ||
             static_cast<size_t>(task_id) >= st->tasks.size()) {
             oob = true;
         } else {
@@ -2399,22 +2449,14 @@ PyObject* Progress_set_description(PyProgress* self, PyObject* desc_obj) {
     Py_ssize_t dlen = 0;
     const char* ds = PyUnicode_AsUTF8AndSize(desc_obj, &dlen);
     if (!ds) return nullptr;
-    bool empty = false;
     auto* st = self->state;
     Py_BEGIN_ALLOW_THREADS
     {
         std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (st->tasks.empty()) {
-            empty = true;
-        } else {
-            st->tasks[0]->description.assign(ds, static_cast<size_t>(dlen));
-        }
+        materialize_task0_locked(st)->description.assign(
+            ds, static_cast<size_t>(dlen));
     }
     Py_END_ALLOW_THREADS
-    if (empty) {
-        PyErr_SetString(PyExc_IndexError, "no tasks");
-        return nullptr;
-    }
     st->render_cv.notify_one();
     Py_RETURN_NONE;
 }
@@ -2965,7 +3007,9 @@ int Tracker_init(PyTracker* self, PyObject* args, PyObject* kwds) {
         // (unique_ptr) so the cached pointer remains valid for the
         // lifetime of the Progress instance.
         std::lock_guard<std::mutex> lg(st->render_mtx);
-        if (st->tasks.empty()) {
+        if (task_id == 0) {
+            self->task = materialize_task0_locked(st);
+        } else if (st->tasks.empty()) {
             lookup = LOOKUP_EMPTY;
         } else if (task_id < 0 ||
                    static_cast<size_t>(task_id) >= st->tasks.size()) {

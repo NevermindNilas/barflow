@@ -26,7 +26,7 @@ import barflow
 from barflow import columns as C
 
 
-def capture_snapshots(total, drive, *, timeout=2.0):
+def capture_snapshots(total, drive, *, timeout=2.0, **progress_kwargs):
     """Run `drive(progress)` then return the last callback task snapshot.
 
     `drive` receives the live Progress and should advance it. Returns a
@@ -50,7 +50,8 @@ def capture_snapshots(total, drive, *, timeout=2.0):
         })
         return ""
 
-    p = barflow.Progress(C.CallbackColumn(_cb), total=total, disable=True)
+    p = barflow.Progress(C.CallbackColumn(_cb), total=total, disable=True,
+                         **progress_kwargs)
     p.__enter__()
     try:
         drive(p)

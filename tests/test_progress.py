@@ -170,10 +170,70 @@ def test_set_task_description_out_of_range_raises():
             p.set_task_description(99, "x")
 
 
-def test_set_description_with_no_tasks_raises():
+def test_set_description_with_no_tasks_creates_task_zero():
     with barflow.Progress(disable=True) as p:   # no total / no add_task
+        p.set_description("x")
+        assert p.n_tasks == 1
+
+
+# ---- total=None: task 0 is implicit, total learned later --------------------
+
+def test_total_none_then_set_total_counts():
+    # tqdm-style unknown total: the bar keeps the constructor's desc and
+    # counts once the total arrives (e.g. a download's Content-Length).
+    def drive(p):
+        p.set_total(0, 100)
+        p.advance(40)
+
+    snap = capture_snapshots(None, drive)
+    assert snap["completed"] == 40
+    assert snap["total"] == 100
+    assert snap["fraction"] == 0.4
+
+
+def test_total_none_advance_before_set_total():
+    def drive(p):
+        p.advance(3)
+        p.set_total(0, 10)
+        p.advance(2)
+
+    snap = capture_snapshots(None, drive)
+    assert snap["completed"] == 5
+    assert snap["total"] == 10
+
+
+def test_total_none_keeps_desc_and_initial():
+    def drive(p):
+        assert p.n_tasks == 0            # deferred until targeted
+        p.set_total(0, 20)
+        assert p.n_tasks == 1
+
+    snap = capture_snapshots(None, drive, desc="dl", initial=7)
+    assert snap["completed"] == 7
+    assert snap["total"] == 20
+    assert snap["description"] == "dl"
+
+
+def test_total_none_update_and_postfix_target_task_zero():
+    with barflow.Progress(disable=True) as p:
+        p.set_postfix_str(0, "x")
+        p.update(0, 4)
+        assert p.n_tasks == 1
+        assert p.completed == 4
+
+
+def test_add_task_first_still_gets_id_zero():
+    with barflow.Progress(desc="ignored", disable=True) as p:
+        assert p.add_task(total=5, desc="a") == 0
+        assert p.add_task(total=5, desc="b") == 1
+        assert p.n_tasks == 2
+
+
+def test_total_none_other_task_ids_still_raise():
+    with barflow.Progress(disable=True) as p:
         with pytest.raises(IndexError):
-            p.set_description("x")
+            p.set_total(1, 10)
+        assert p.n_tasks == 0
 
 
 # ---- computed-state aliases / multi-task descriptions ----------------------
